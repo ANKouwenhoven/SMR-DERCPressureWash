@@ -1,0 +1,8 @@
+*.dll
+*.exe
+*.pyd
+*.zip
+*.egg-info
+__pycache__/
+*.pyc
+.venv/
