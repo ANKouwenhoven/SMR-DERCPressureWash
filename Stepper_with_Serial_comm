@@ -1,0 +1,125 @@
+//The pins on the arduino are numbered below. The input to the stepper driver are the PULSE_PIN and DIR_PIN.
+#define PULSE_PIN  9
+#define DIR_PIN    8
+
+// ============================================================
+//  CHANGE DEFAULTS HERE
+// ============================================================
+#define DEFAULT_RPM        120
+#define DEFAULT_ROTATIONS  1       // 0 = run forever
+#define MICROSTEPS         16
+#define DIRECTION          LOW
+// ============================================================
+
+#define STEPS_PER_REV  (200 * MICROSTEPS)
+
+float         rpm            = DEFAULT_RPM;
+long          targetRotations = DEFAULT_ROTATIONS;  // 0 = continuous
+long          stepsDone      = 0;
+long          stepsTarget    = 0;                   // calculated on start
+bool          running        = false;
+
+unsigned long currentMicros  = 0;
+unsigned long previousMicros = 0;
+unsigned long stepPeriodUs   = 0;
+
+String        serialBuffer   = "";
+
+void recalculate() {
+  stepPeriodUs  = (unsigned long)(60000000L / (rpm * STEPS_PER_REV));
+  stepsTarget = (targetRotations == 0) ? -1 : (long)targetRotations * STEPS_PER_REV / 2;
+}
+
+void printStatus() {
+  Serial.println("------------------------------");
+  Serial.print("RPM       : "); Serial.println(rpm);
+  Serial.print("Rotations : "); Serial.println(targetRotations == 0 ? "continuous" : String(targetRotations));
+  Serial.print("Status    : "); Serial.println(running ? "RUNNING" : "STOPPED");
+  Serial.println("Commands  : RPM:120 | ROT:5 | START | STOP");
+  Serial.println("------------------------------");
+}
+
+void handleCommand(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase();
+
+  if (cmd == "START") {
+    stepsDone = 0;
+    recalculate();
+    running = true;
+    Serial.println(">> Starting");
+    printStatus();
+
+  } else if (cmd == "STOP") {
+    running = false;
+    Serial.println(">> Stopped");
+
+  } else if (cmd.startsWith("RPM:")) {
+    float val = cmd.substring(4).toFloat();
+    if (val > 0) {
+      rpm = val;
+      recalculate();
+      Serial.print(">> RPM set to "); Serial.println(rpm);
+    } else {
+      Serial.println("!! Invalid RPM value");
+    }
+
+  } else if (cmd.startsWith("ROT:")) {
+    long val = cmd.substring(4).toInt();
+    if (val >= 0) {
+      targetRotations = val;
+      recalculate();
+      Serial.print(">> Rotations set to ");
+      Serial.println(targetRotations == 0 ? "continuous" : String(targetRotations));
+    } else {
+      Serial.println("!! Invalid rotations value");
+    }
+
+  } else {
+    Serial.println("!! Unknown command. Use: RPM:120 | ROT:5 | START | STOP");
+  }
+}
+
+void setup() {
+  pinMode(PULSE_PIN, OUTPUT);
+  pinMode(DIR_PIN,   OUTPUT);
+  digitalWrite(DIR_PIN, DIRECTION);
+
+  Serial.begin(9600);
+  recalculate();
+
+  Serial.println("== Stepper ready ==");
+  printStatus();
+}
+
+void loop() {
+  // --- Serial input ---
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialBuffer.length() > 0) {
+        handleCommand(serialBuffer);
+        serialBuffer = "";
+      }
+    } else {
+      serialBuffer += c;
+    }
+  }
+
+  // --- Stepping ---
+  if (!running) return;
+  if (stepsTarget != -1 && stepsDone >= stepsTarget) {
+    running = false;
+    Serial.println(">> Done - target rotations reached");
+    return;
+  }
+
+  currentMicros = micros();
+  if (currentMicros - previousMicros >= stepPeriodUs) {
+    previousMicros = currentMicros;
+    digitalWrite(PULSE_PIN, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(PULSE_PIN, LOW);
+    stepsDone++;
+  }
+}
