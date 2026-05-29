@@ -2,7 +2,7 @@
 #define DIR_PIN    8
 #define MICROSTEPS 128
 #define DIRECTION  LOW
-#define STEPS_PER_REV (200 * MICROSTEPS)
+#define STEPS_PER_REV (400 * MICROSTEPS)
 #define STEPS_PER_SHOT (STEPS_PER_REV / 45)
 #define DEFAULT_RPM 3
 
