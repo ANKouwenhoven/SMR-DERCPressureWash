@@ -21,14 +21,17 @@ import serial
 #  CONFIGURATION (also editable via Settings UI)
 # ─────────────────────────────────────────────
 CONFIG = {
-    "camera_height_m":    0.22,
-    "camera_distance_m":  0.50,
-    "camera_tilt_deg":    113.0,
-    "degrees_per_step":   7.5,
-    "camera_width":       848,
-    "camera_height":      480,
+    "depth_max_m": 0.75,  # ignore anything further than this from camera
+    "camera_height_m":    0.24,
+    "camera_distance_m":  0.52,
+    "camera_tilt_deg":    25,
+    "camera_x_offset_m":  0.0,
+    "camera_y_offset_m":  0.0,
+    "degrees_per_step":   8,
+    "camera_width":       1280,
+    "camera_height":      720,
     "camera_fps":         30,
-    "arduino_port":       "/dev/ttyACM0",
+    "arduino_port":       "COM3",
     "arduino_enabled":    True,
     "robot_ip":           "192.168.0.43",
     "robot_port":         50002,
@@ -82,13 +85,17 @@ def arduino_rotate():
         return True
     try:
         with arduino_lock:
-            arduino_serial.write(b"ROTATE\n")
-            arduino_serial.flush()
-            while True:
-                line = arduino_serial.readline().decode().strip()
-                print(f"[Arduino] {line}")
-                if line == "DONE":
-                    return True
+            for i in range(2):
+                arduino_serial.write(b"ROTATE\n")
+                arduino_serial.flush()
+                while True:
+                    line = arduino_serial.readline().decode().strip()
+                    print(f"[Arduino] {line}")
+                    if line == "DONE":
+                        #return True
+                        break
+            return True
+
     except Exception as e:
         print(f"[Arduino] Rotate error: {e}")
         return False
@@ -207,78 +214,91 @@ def preview_loop():
 
 # ── Pointcloud processing ─────────────────────────────────────
 
+def get_camera_extrinsics():
+    dtr  = np.pi / 180
+    # 25° below horizontal = rotate camera downward by 25°
+    tilt = CONFIG["camera_tilt_deg"] * dtr  # positive = downward tilt
+
+    d = CONFIG["camera_distance_m"]
+    cam_x_offset = CONFIG.get("camera_x_offset_m", -0.15)
+    cam_y_offset = CONFIG.get("camera_y_offset_m", 0.0)
+
+    t = np.array([
+        cam_x_offset,
+        -d + cam_y_offset,
+        CONFIG["camera_height_m"]
+    ])
+
+    # Camera faces +Y (toward turntable), tilted downward around X axis
+    # tilt > 0 means nose down
+    R_tilt = np.array([
+        [1,            0,           0],
+        [0,  np.cos(tilt), np.sin(tilt)],
+        [0, -np.sin(tilt), np.cos(tilt)],
+    ])
+
+    return R_tilt, t
+
 def process_frame_to_pcd(color_img, depth_img, angle_deg, intrinsic):
-    """
-    Convert a depth+colour frame to a pointcloud in world space.
-    Camera is FIXED, turntable ROTATES — use original student's approach
-    which treats it equivalently to rotating camera around stationary object.
-    """
     o3d = get_open3d()
     if o3d is None:
         return None
 
-    dtr = np.pi / 180
+    # Depth cutoff
+    depth_filtered = depth_img.copy()
+    depth_max_mm = CONFIG.get("depth_max_m", 0.75) * 1000
+    depth_filtered[depth_filtered > depth_max_mm] = 0
 
-    # Build RGBD image and pointcloud in camera space
-    depth_o3d = o3d.geometry.Image(depth_img)
+    depth_o3d = o3d.geometry.Image(depth_filtered)
     color_o3d = o3d.geometry.Image(color_img)
     rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        color_o3d, depth_o3d, convert_rgb_to_intensity=False)
+        color_o3d, depth_o3d,
+        depth_scale=1000.0,
+        depth_trunc=CONFIG.get("depth_max_m", 0.75),
+        convert_rgb_to_intensity=False)
     pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
-
-    # Downsample to save memory
-    pcd = pcd.voxel_down_sample(voxel_size=0.005)
+    pcd = pcd.voxel_down_sample(voxel_size=0.006)  # slightly larger merges nearby duplicates
 
     if len(np.asarray(pcd.points)) == 0:
         return pcd
 
-    # ── Camera position in world space (original student's formula) ──
-    distance = CONFIG["camera_distance_m"]
-    x = np.sin(angle_deg * dtr) * distance - np.cos(angle_deg * dtr) * 0.035
-    y = -np.cos(angle_deg * dtr) * distance - np.sin(angle_deg * dtr) * 0.035
-    z = CONFIG["camera_height_m"]
+    # Step 1: transform from camera space to world space (fixed camera)
+    R, t = get_camera_extrinsics()
+    pcd.rotate(R, center=(0, 0, 0))
+    pcd.translate(t)
 
-    # ── Rotation matrix (original student's formula with our tilt) ──
-    o = -angle_deg * dtr
-    a = (-CONFIG["camera_tilt_deg"]) * dtr
-    t = 0.0
-    R = [
-        [np.cos(o)*np.cos(t) - np.cos(a)*np.sin(o)*np.sin(t),
-         -np.cos(o)*np.sin(t) - np.cos(a)*np.cos(t)*np.sin(o),
-         np.sin(o)*np.sin(a)],
-        [np.cos(t)*np.sin(o) + np.cos(o)*np.cos(a)*np.sin(t),
-         np.cos(o)*np.cos(a)*np.cos(t) - np.sin(o)*np.sin(t),
-         -np.cos(o)*np.sin(a)],
-        [np.sin(a)*np.sin(t),
-         np.cos(t)*np.sin(a),
-         np.cos(a)]
-    ]
+    # Step 2: counter-rotate by turntable angle around world Z axis
+    # This "unspins" each frame so all frames align in a common world space
+    dtr = np.pi / 180
+    a   = -angle_deg * dtr  # negative = counter-rotate
+    R_unspin = np.array([
+        [ np.cos(a), -np.sin(a), 0],
+        [ np.sin(a),  np.cos(a), 0],
+        [         0,          0, 1],
+    ])
+    # Rotate around turntable centre (world origin in XY)
+    pcd.rotate(R_unspin, center=(0, 0, 0))
 
-    pcd.rotate(R, (0, 0, 0))
-    pcd.translate((x, y, z))
-
-    # ── Bounding box in world space ──
-    # Keep only points within reasonable range of turntable centre
-    # Z: above table surface (0) up to 60cm above
-    # X/Y: within 40cm of turntable centre
+    # Crop to bbox
     bbox = o3d.geometry.AxisAlignedBoundingBox(
-        (-0.40, -0.40, 0.01),   # min: 40cm radius, 1cm above table
-        ( 0.40,  0.40, 0.60)    # max: 40cm radius, 60cm above table
+        (-0.40, -0.40, -0.005),
+        ( 0.40,  0.40, 0.80)
     )
     pcd = pcd.crop(bbox)
 
     if len(np.asarray(pcd.points)) == 0:
         return pcd
 
-    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=0.8)
     return pcd
 
 
 def draw_bbox_on_image(color_img, intrinsic, angle_deg):
-    """Project the 3D bounding box onto the camera image for debug visualisation."""
-    dtr = np.pi / 180
-
-    # Same bbox as process_frame_to_pcd
+    """
+    Project the fixed world-space bbox into the camera image.
+    Since the camera never moves, this projection is identical every frame.
+    The angle_deg parameter is kept for API compatibility but not used.
+    """
     x_min, x_max = -0.40, 0.40
     y_min, y_max = -0.40, 0.40
     z_min, z_max =  0.01, 0.60
@@ -290,36 +310,20 @@ def draw_bbox_on_image(color_img, intrinsic, angle_deg):
         [x_max, y_max, z_max], [x_min, y_max, z_max],
     ])
 
-    # Reverse transform: world → camera space
-    distance = CONFIG["camera_distance_m"]
-    tx = np.sin(angle_deg*dtr) * distance - np.cos(angle_deg*dtr) * 0.035
-    ty = -np.cos(angle_deg*dtr) * distance - np.sin(angle_deg*dtr) * 0.035
-    tz = CONFIG["camera_height_m"]
+    R, t = get_camera_extrinsics()
+    R_inv = R.T  # inverse rotation = transpose
 
-    o = angle_deg * dtr
-    a = (-CONFIG["camera_tilt_deg"]) * dtr
-    t = 0.0
-    # Transpose of rotation matrix = inverse rotation
-    R_fwd = np.array([
-        [np.cos(o)*np.cos(t) - np.cos(a)*np.sin(o)*np.sin(t),
-         -np.cos(o)*np.sin(t) - np.cos(a)*np.cos(t)*np.sin(o),
-         np.sin(o)*np.sin(a)],
-        [np.cos(t)*np.sin(o) + np.cos(o)*np.cos(a)*np.sin(t),
-         np.cos(o)*np.cos(a)*np.cos(t) - np.sin(o)*np.sin(t),
-         -np.cos(o)*np.sin(a)],
-        [np.sin(a)*np.sin(t), np.cos(t)*np.sin(a), np.cos(a)]
-    ])
-    R_inv = R_fwd.T
-
-    img = cv2.cvtColor(color_img.copy(), cv2.COLOR_RGB2BGR)
     fx = intrinsic.intrinsic_matrix[0][0]
     fy = intrinsic.intrinsic_matrix[1][1]
     cx = intrinsic.intrinsic_matrix[0][2]
     cy = intrinsic.intrinsic_matrix[1][2]
 
+    img = cv2.cvtColor(color_img.copy(), cv2.COLOR_RGB2BGR)
+
     projected = []
     for corner in corners:
-        p = R_inv @ (corner - np.array([tx, ty, tz]))
+        # World → camera space
+        p = R_inv @ (corner - t)
         if p[2] > 0.01:
             u = int(fx * p[0] / p[2] + cx)
             v = int(fy * p[1] / p[2] + cy)
@@ -335,16 +339,14 @@ def draw_bbox_on_image(color_img, intrinsic, angle_deg):
         if projected[i] and projected[j]:
             cv2.line(img, projected[i], projected[j], (0, 255, 0), 2)
 
-    # Draw centre cross at turntable centre projected onto image
-    centre_world = np.array([0.0, 0.0, 0.0])
-    p = R_inv @ (centre_world - np.array([tx, ty, tz]))
+    # Turntable centre cross at world origin
+    p = R_inv @ (np.array([0.0, 0.0, 0.0]) - t)
     if p[2] > 0.01:
         u = int(fx * p[0] / p[2] + cx)
         v = int(fy * p[1] / p[2] + cy)
         cv2.drawMarker(img, (u, v), (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
 
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
 
 def pcd_to_json(pcd):
     if pcd is None:
@@ -479,8 +481,13 @@ def capture_at_angle(angle):
     if rs is None or o3d is None or pipeline is None:
         return False
     try:
+        with pipe_lock:
+            sensor = pipeline.get_active_profile().get_device().query_sensors()[0]
+            sensor.set_option(rs.option.enable_auto_exposure, 0)
+            sensor.set_option(rs.option.exposure, 1500)
+
         # Warm up auto exposure
-        for _ in range(5):
+        for _ in range(15):
             with pipe_lock:
                 pipeline.wait_for_frames()
 
