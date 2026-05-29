@@ -2,8 +2,8 @@
 #define DIR_PIN    8
 #define MICROSTEPS 128
 #define DIRECTION  LOW
-#define STEPS_PER_REV (400 * MICROSTEPS)
-#define STEPS_PER_SHOT (STEPS_PER_REV / 45)
+#define STEPS_PER_REV (200 * MICROSTEPS)
+#define STEPS_PER_SHOT (STEPS_PER_REV / 22.5)
 #define DEFAULT_RPM 3
 
 float rpm = DEFAULT_RPM;
@@ -20,11 +20,11 @@ void rotateSteps(long steps) {
   for (long i = 0; i < steps; i++) {
     unsigned long period;
     if (i < rampSteps) {
-      period = 1500 + (1500 * 3 * (rampSteps - i) / rampSteps);
+      period = 1000 + (1000 * 3 * (rampSteps - i) / rampSteps);
     } else if (i > steps - rampSteps) {
-      period = 1500 + (1500 * 3 * (i - (steps - rampSteps)) / rampSteps);
+      period = 1000 + (1000 * 3 * (i - (steps - rampSteps)) / rampSteps);
     } else {
-      period = 1500;
+      period = 1000;
     }
     digitalWrite(PULSE_PIN, HIGH);
     delayMicroseconds(50);
