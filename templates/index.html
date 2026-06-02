@@ -1,0 +1,1259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Scanner — UR10 Cleaning System</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  :root {
+    --bg:       #0d1117;
+    --panel:    #161b22;
+    --border:   #30363d;
+    --accent:   #e94560;
+    --blue:     #58a6ff;
+    --green:    #3fb950;
+    --yellow:   #d29922;
+    --text:     #c9d1d9;
+    --muted:    #8b949e;
+    --clean:    #ff4444;
+    --avoid:    #4488ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  header h1 { color: var(--accent); font-size: 15px; letter-spacing: 2px; }
+  .status-bar { display: flex; gap: 16px; align-items: center; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+  .dot-green  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-red    { background: var(--accent); }
+  .dot-yellow { background: var(--yellow); }
+
+  /* ── Tabs ── */
+  .tabs {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-shrink: 0;
+  }
+  .tab {
+    padding: 10px 24px;
+    cursor: pointer;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    letter-spacing: 1px;
+  }
+  .tab:hover  { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* ── Tab content ── */
+  .tab-content { display: none; flex: 1; overflow: hidden; }
+  .tab-content.active { display: flex; }
+
+  /* ── Panels ── */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .panel-title {
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    margin-bottom: 4px;
+  }
+
+  /* ── Buttons ── */
+  .btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    transition: all 0.2s;
+    width: 100%;
+  }
+  .btn-primary   { background: var(--accent); color: white; }
+  .btn-primary:hover { background: #ff6b80; }
+  .btn-secondary { background: #21262d; color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--blue); color: var(--blue); }
+  .btn-success   { background: #1a4731; color: var(--green); border: 1px solid var(--green); }
+  .btn-success:hover { background: var(--green); color: #000; }
+  .btn:disabled  { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Canvas containers ── */
+  .video-box {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    min-height: 0;
+  }
+  .video-box img, .video-box canvas { max-width: 100%; max-height: 100%; }
+
+  /* ════════════════════════════════
+     TAB 1 — SCAN
+  ════════════════════════════════ */
+  #tab-scan {
+    padding: 10px;
+    gap: 10px;
+  }
+  .scan-grid {
+    display: grid;
+    grid-template-columns: 200px 1fr 1fr 1fr;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+  }
+  .scan-controls { display: flex; flex-direction: column; gap: 8px; }
+  #angle-display {
+    font-size: 24px;
+    color: var(--accent);
+    text-align: center;
+    padding: 8px 0;
+  }
+  .progress-bar-wrap {
+    background: #21262d;
+    border-radius: 4px;
+    height: 8px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s;
+    width: 0%;
+  }
+  #scan-status {
+    color: var(--muted);
+    font-size: 11px;
+    text-align: center;
+    min-height: 40px;
+    white-space: pre-line;
+  }
+  #arduino-status {
+    font-size: 11px;
+    text-align: center;
+    padding: 4px;
+    border-radius: 4px;
+  }
+
+  /* ════════════════════════════════
+     TAB 2 — SELECT FACES
+  ════════════════════════════════ */
+  #tab-select {
+    padding: 10px;
+    gap: 10px;
+  }
+  .select-grid {
+    display: grid;
+    grid-template-columns: 1fr 200px;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+  }
+  #select-canvas-wrap {
+    position: relative;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  #select-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+  .brush-controls { display: flex; flex-direction: column; gap: 10px; }
+  .brush-btn {
+    padding: 10px;
+    border-radius: 4px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    width: 100%;
+    transition: all 0.2s;
+  }
+  .brush-clean { background: rgba(255,68,68,0.15); color: var(--clean); border-color: var(--clean); }
+  .brush-avoid { background: rgba(68,136,255,0.15); color: var(--avoid); border-color: var(--avoid); }
+  .brush-erase { background: #21262d; color: var(--muted); border-color: var(--border); }
+  .brush-btn.active { opacity: 1; }
+  .brush-btn:not(.active) { opacity: 0.5; }
+  .slider-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .slider-wrap label { color: var(--muted); font-size: 11px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .legend { display: flex; flex-direction: column; gap: 4px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .paint-hint {
+    font-size: 10px;
+    color: var(--yellow);
+    text-align: center;
+    padding: 4px;
+    border: 1px solid var(--yellow);
+    border-radius: 4px;
+  }
+
+  /* ════════════════════════════════
+     TAB 3 — ROBOT
+  ════════════════════════════════ */
+  #tab-robot { padding: 10px; gap: 10px; }
+  .robot-grid {
+    display: grid;
+    grid-template-columns: 1fr 200px;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+  }
+  #robot-canvas-wrap {
+    background: #000813;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  #robot-canvas-wrap canvas { display: block; }
+  .robot-controls { display: flex; flex-direction: column; gap: 8px; }
+  .moveit-status {
+    padding: 8px;
+    border-radius: 4px;
+    background: #21262d;
+    font-size: 11px;
+    color: var(--muted);
+    min-height: 60px;
+    white-space: pre-line;
+  }
+
+  /* ════════════════════════════════
+     TAB 4 — SETTINGS
+  ════════════════════════════════ */
+  #tab-settings {
+    padding: 20px;
+    overflow-y: auto;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    max-width: 900px;
+  }
+  .setting-group { display: flex; flex-direction: column; gap: 12px; }
+  .setting-row { display: flex; flex-direction: column; gap: 4px; }
+  .setting-row label { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+  .setting-row input, .setting-row select {
+    background: #21262d;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    width: 100%;
+  }
+  .setting-row input:focus, .setting-row select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .setting-hint { color: var(--muted); font-size: 10px; margin-top: 2px; }
+  .settings-actions { display: flex; gap: 10px; max-width: 400px; margin-top: 10px; }
+  .save-msg { color: var(--green); font-size: 12px; display: none; align-items: center; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header>
+  <h1>◈ 3D SCANNER — UR10 CLEANING SYSTEM</h1>
+  <div class="status-bar">
+    <span><span class="status-dot dot-red" id="dot-camera"></span>Camera</span>
+    <span><span class="status-dot dot-red" id="dot-scan"></span>Scanning</span>
+    <span><span class="status-dot dot-red" id="dot-ros"></span>ROS2</span>
+    <span><span class="status-dot dot-red" id="dot-arduino"></span>Arduino</span>
+    <span id="header-angle" style="color:var(--muted)">0.0° / 360°</span>
+  </div>
+</header>
+
+<!-- ── Tabs ── -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('scan')">① SCAN</div>
+  <div class="tab" onclick="switchTab('select')">② SELECT FACES</div>
+  <div class="tab" onclick="switchTab('robot')">③ ROBOT</div>
+  <div class="tab" onclick="switchTab('settings')">⚙ SETTINGS</div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 1 — SCAN
+════════════════════════════════ -->
+<div id="tab-scan" class="tab-content active">
+  <div class="scan-grid">
+
+    <!-- Controls -->
+    <div class="panel scan-controls">
+      <div class="panel-title">Controls</div>
+      <div id="angle-display">0.0°</div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="progress-fill"></div>
+      </div>
+      <div id="scan-status">Ready to scan</div>
+
+      <div id="arduino-status" style="background:#1a2a1a;color:var(--muted);border:1px solid var(--border)">
+        Arduino: checking...
+      </div>
+
+      <button class="btn btn-primary" id="btn-start-scan" onclick="startScan()">▶ START SCAN</button>
+
+      <!-- Manual button — hidden when Arduino enabled -->
+      <button class="btn btn-secondary" id="btn-capture" onclick="captureFrame()"
+              disabled style="display:none">
+        📸 TABLE ROTATED<br>TAKE PHOTO
+      </button>
+
+      <button class="btn btn-secondary" id="btn-stop-scan" onclick="stopScan()" disabled>
+        ■ STOP SCAN
+      </button>
+
+      <hr style="border-color:var(--border)">
+      <div class="panel-title">Info</div>
+      <div style="color:var(--muted);font-size:11px">
+        Step: <span id="info-step" style="color:var(--text)">7.5°</span><br>
+        Photos: <span id="info-photos" style="color:var(--text)">0 / 48</span><br>
+        Points: <span id="info-points" style="color:var(--text)">0</span>
+      </div>
+    </div>
+
+    <!-- Live camera -->
+    <div class="panel" style="min-height:0">
+      <div class="panel-title">Live Camera Feed</div>
+      <div class="video-box">
+        <img id="camera-img" src="" alt="Camera feed" style="display:none">
+        <div id="camera-placeholder" style="color:var(--muted)">Starting camera...</div>
+      </div>
+    </div>
+
+    <!-- Last snapshot -->
+    <div class="panel" style="min-height:0">
+      <div class="panel-title">Last Snapshot</div>
+      <div class="video-box">
+        <img id="snapshot-img" src="" alt="Snapshot" style="display:none">
+        <div id="snapshot-placeholder" style="color:var(--muted)">No snapshot yet</div>
+      </div>
+      <div id="snapshot-angle" style="color:var(--muted);font-size:11px;text-align:center"></div>
+    </div>
+
+    <!-- Pointcloud -->
+    <div class="panel" style="min-height:0">
+      <div class="panel-title">Pointcloud (Live)</div>
+      <div class="video-box" id="pcd-box">
+        <canvas id="pcd-canvas"></canvas>
+      </div>
+      <div style="color:var(--muted);font-size:10px;text-align:center">
+        Drag to rotate · Scroll to zoom
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 2 — SELECT FACES
+════════════════════════════════ -->
+<div id="tab-select" class="tab-content">
+  <div class="select-grid">
+
+    <div id="select-canvas-wrap">
+      <canvas id="select-canvas"></canvas>
+    </div>
+
+    <div class="panel brush-controls">
+      <div class="panel-title">Brush Tool</div>
+
+      <div class="paint-hint">Hold SHIFT + drag to paint</div>
+
+      <button class="brush-btn brush-clean active" id="btn-brush-clean"
+              onclick="setBrush('clean')">
+        🔴 CLEAN ZONE<br><small>Paint areas to clean</small>
+      </button>
+      <button class="brush-btn brush-avoid" id="btn-brush-avoid"
+              onclick="setBrush('avoid')">
+        🔵 AVOID ZONE<br><small>Paint areas to avoid</small>
+      </button>
+      <button class="brush-btn brush-erase" id="btn-brush-erase"
+              onclick="setBrush('erase')">
+        ⬜ ERASE<br><small>Remove paint</small>
+      </button>
+
+      <div class="slider-wrap">
+        <label>Brush Size: <span id="brush-size-val">20</span>px</label>
+        <input type="range" id="brush-size" min="5" max="80" value="20"
+               oninput="brushSize=+this.value; document.getElementById('brush-size-val').textContent=this.value">
+      </div>
+
+      <div class="legend">
+        <div class="panel-title">Legend</div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--clean)"></div>
+          Clean zone
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--avoid)"></div>
+          Avoid zone
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--muted)"></div>
+          Unselected
+        </div>
+      </div>
+
+      <hr style="border-color:var(--border)">
+      <button class="btn btn-secondary" onclick="clearPaint()">🗑 Clear Paint</button>
+      <button class="btn btn-success" onclick="exportSTLs()" id="btn-export">
+        ⬡ EXPORT STLs → MoveIt
+      </button>
+      <div id="export-status" style="color:var(--muted);font-size:11px;text-align:center;white-space:pre-line"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 3 — ROBOT
+════════════════════════════════ -->
+<div id="tab-robot" class="tab-content">
+  <div class="robot-grid">
+
+    <div id="robot-canvas-wrap">
+      <canvas id="robot-canvas"></canvas>
+      <div style="position:absolute;bottom:8px;left:8px;color:var(--muted);font-size:10px">
+        Drag to rotate · Scroll to zoom
+      </div>
+    </div>
+
+    <div class="panel robot-controls">
+      <div class="panel-title">MoveIt Control</div>
+
+      <div class="moveit-status" id="moveit-status">
+        Waiting for scan and face selection...
+      </div>
+
+      <button class="btn btn-secondary" onclick="sendToMoveIt('clean')">
+        🔴 Send Clean Zone
+      </button>
+      <button class="btn btn-secondary" onclick="sendToMoveIt('avoid')">
+        🔵 Send Avoid Zone
+      </button>
+
+      <hr style="border-color:var(--border)">
+      <div class="panel-title">Scene Objects</div>
+      <div id="scene-objects" style="color:var(--muted);font-size:11px">No objects in scene</div>
+      <button class="btn btn-secondary" onclick="clearMoveItScene()">🗑 Clear Scene</button>
+
+      <hr style="border-color:var(--border)">
+      <div class="panel-title">Object Position</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px">
+        <div>
+          <label style="color:var(--muted);font-size:10px">X (m)</label>
+          <input type="number" id="obj-x" value="0.5" step="0.05"
+                 style="background:#21262d;border:1px solid var(--border);border-radius:4px;
+                        color:var(--text);padding:4px;width:100%;font-size:12px">
+        </div>
+        <div>
+          <label style="color:var(--muted);font-size:10px">Y (m)</label>
+          <input type="number" id="obj-y" value="0.0" step="0.05"
+                 style="background:#21262d;border:1px solid var(--border);border-radius:4px;
+                        color:var(--text);padding:4px;width:100%;font-size:12px">
+        </div>
+        <div>
+          <label style="color:var(--muted);font-size:10px">Z (m)</label>
+          <input type="number" id="obj-z" value="0.2" step="0.05"
+                 style="background:#21262d;border:1px solid var(--border);border-radius:4px;
+                        color:var(--text);padding:4px;width:100%;font-size:12px">
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 4 — SETTINGS
+════════════════════════════════ -->
+<div id="tab-settings" class="tab-content">
+  <div style="padding:20px;overflow-y:auto;width:100%">
+    <h2 style="color:var(--accent);margin-bottom:20px;font-size:14px;letter-spacing:2px">⚙ SETTINGS</h2>
+    <div class="settings-grid">
+
+      <div class="panel setting-group">
+        <div class="panel-title">Camera Settings</div>
+        <div class="setting-row">
+          <label>CAMERA HEIGHT (metres)</label>
+          <input type="number" id="s-camera-height" step="0.01" value="0.165">
+          <div class="setting-hint">Height of camera above turntable surface</div>
+        </div>
+        <div class="setting-row">
+          <label>CAMERA DISTANCE (metres)</label>
+          <input type="number" id="s-camera-distance" step="0.01" value="0.258">
+          <div class="setting-hint">Distance from camera to turntable centre</div>
+        </div>
+        <div class="setting-row">
+          <label>CAMERA TILT ANGLE (degrees)</label>
+          <input type="number" id="s-camera-tilt" step="0.5" value="112.5">
+          <div class="setting-hint">Downward tilt angle of camera</div>
+        </div>
+        <div class="setting-row">
+          <label>DEGREES PER STEP</label>
+          <input type="number" id="s-degrees-step" step="0.5" value="7.5">
+          <div class="setting-hint">Rotation per photo (7.5° = 48 photos)</div>
+        </div>
+        <div class="setting-row">
+          <label>CAMERA RESOLUTION</label>
+          <select id="s-resolution">
+            <option value="848x480">848 × 480 (default)</option>
+            <option value="640x480">640 × 480</option>
+            <option value="1280x720">1280 × 720</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="panel setting-group">
+        <div class="panel-title">Hardware Settings</div>
+        <div class="setting-row">
+          <label>ARDUINO PORT</label>
+          <input type="text" id="s-arduino-port" value="/dev/ttyACM0">
+          <div class="setting-hint">e.g. /dev/ttyACM0 or /dev/ttyUSB0</div>
+        </div>
+        <div class="setting-row">
+          <label>ARDUINO ENABLED</label>
+          <select id="s-arduino-enabled" onchange="updateArduinoUI()">
+            <option value="true">Enabled (auto rotation)</option>
+            <option value="false">Disabled (manual rotation)</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label>ROBOT IP ADDRESS</label>
+          <input type="text" id="s-robot-ip" value="192.168.0.43">
+          <div class="setting-hint">UR10 CB3 IP address</div>
+        </div>
+        <div class="setting-row">
+          <label>STEP PIN (Arduino)</label>
+          <input type="number" id="s-step-pin" value="9">
+        </div>
+        <div class="setting-row">
+          <label>DIR PIN (Arduino)</label>
+          <input type="number" id="s-dir-pin" value="8">
+        </div>
+      </div>
+
+      <div class="panel setting-group">
+        <div class="panel-title">Export Settings</div>
+        <div class="setting-row">
+          <label>CLEAN STL OUTPUT PATH</label>
+          <input type="text" id="s-clean-path" value="~/scan_clean.stl">
+        </div>
+        <div class="setting-row">
+          <label>AVOID STL OUTPUT PATH</label>
+          <input type="text" id="s-avoid-path" value="~/scan_avoid.stl">
+        </div>
+        <div class="setting-row">
+          <label>AUTO SEND TO MOVEIT</label>
+          <select id="s-auto-moveit">
+            <option value="true">Yes — send automatically after export</option>
+            <option value="false">No — send manually</option>
+          </select>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="settings-actions">
+      <button class="btn btn-primary" onclick="saveSettings()" style="width:auto;padding:8px 24px">
+        💾 SAVE SETTINGS
+      </button>
+      <button class="btn btn-secondary" onclick="resetSettings()" style="width:auto;padding:8px 24px">
+        ↺ RESET DEFAULTS
+      </button>
+      <span class="save-msg" id="save-msg">✔ Saved!</span>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     JAVASCRIPT
+════════════════════════════════ -->
+<script>
+// ── Socket.IO ──────────────────────────────────────────────────
+const socket = io();
+let config = {};
+let arduinoEnabled = false;
+let photoCount = 0;
+
+socket.on('connect',    () => setDot('dot-ros', true));
+socket.on('disconnect', () => setDot('dot-ros', false));
+
+socket.on('config', (cfg) => {
+  config = cfg;
+  arduinoEnabled = cfg.arduino_enabled;
+  applyConfigToSettings(cfg);
+  updateArduinoUI();
+});
+
+socket.on('status', (data) => {
+  arduinoEnabled = data.arduino_enabled;
+  updateArduinoUI();
+});
+
+socket.on('camera_frame', (data) => {
+  const img = document.getElementById('camera-img');
+  const ph  = document.getElementById('camera-placeholder');
+  img.src = 'data:image/jpeg;base64,' + data.image;
+  img.style.display = 'block';
+  ph.style.display  = 'none';
+  setDot('dot-camera', true);
+});
+
+socket.on('snapshot', (data) => {
+  const img = document.getElementById('snapshot-img');
+  const ph  = document.getElementById('snapshot-placeholder');
+  img.src = 'data:image/jpeg;base64,' + data.image;
+  img.style.display = 'block';
+  ph.style.display  = 'none';
+  document.getElementById('snapshot-angle').textContent = `Taken at ${data.angle.toFixed(1)}°`;
+  photoCount++;
+  const total = Math.round(360 / (config.degrees_per_step || 7.5));
+  document.getElementById('info-photos').textContent = `${photoCount} / ${total}`;
+});
+
+socket.on('pointcloud_update', (data) => {
+  updatePointcloudViewer(data);
+  updateSelectViewer(data);
+  if (data.points) {
+    document.getElementById('info-points').textContent = data.points.length.toLocaleString();
+  }
+});
+
+socket.on('scan_status', (data) => {
+  setScanStatus(data.message);
+});
+
+socket.on('scan_progress', (data) => {
+  const angle = data.angle;
+  document.getElementById('angle-display').textContent = angle.toFixed(1) + '°';
+  document.getElementById('header-angle').textContent  = `${angle.toFixed(1)}° / 360°`;
+  document.getElementById('progress-fill').style.width = (angle / 360 * 100) + '%';
+});
+
+socket.on('scan_complete', (data) => {
+  setScanStatus(`✔ Scan complete!\n${data.points.toLocaleString()} points captured`);
+  setDot('dot-scan', false);
+  document.getElementById('btn-start-scan').disabled = false;
+  document.getElementById('btn-stop-scan').disabled  = true;
+  document.getElementById('btn-capture').disabled    = true;
+  document.getElementById('progress-fill').style.width = '100%';
+  document.getElementById('angle-display').textContent = '360°';
+});
+
+// ── Arduino UI ─────────────────────────────────────────────────
+function updateArduinoUI() {
+  const statusEl  = document.getElementById('arduino-status');
+  const captureEl = document.getElementById('btn-capture');
+  if (arduinoEnabled) {
+    statusEl.style.background = '#1a2a1a';
+    statusEl.style.color      = 'var(--green)';
+    statusEl.style.border     = '1px solid var(--green)';
+    statusEl.textContent      = '✔ Arduino: AUTO MODE';
+    captureEl.style.display   = 'none';
+    setDot('dot-arduino', true);
+  } else {
+    statusEl.style.background = '#2a1a1a';
+    statusEl.style.color      = 'var(--yellow)';
+    statusEl.style.border     = '1px solid var(--yellow)';
+    statusEl.textContent      = '⚠ Arduino: MANUAL MODE';
+    captureEl.style.display   = 'block';
+    setDot('dot-arduino', false);
+  }
+}
+
+// ── Tab switching ──────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['scan','select','robot','settings'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'select') resizeSelectCanvas();
+  if (name === 'robot')  resizeRobotCanvas();
+}
+
+// ── Status dots ────────────────────────────────────────────────
+function setDot(id, on) {
+  const el = document.getElementById(id);
+  if (el) el.className = 'status-dot ' + (on ? 'dot-green' : 'dot-red');
+}
+
+function setScanStatus(msg) {
+  document.getElementById('scan-status').textContent = msg;
+}
+
+// ── Scan controls ──────────────────────────────────────────────
+async function startScan() {
+  photoCount = 0;
+  const res  = await fetch('/api/scan/start', { method: 'POST' });
+  const data = await res.json();
+  if (data.status === 'ok') {
+    setDot('dot-scan', true);
+    document.getElementById('btn-start-scan').disabled = true;
+    document.getElementById('btn-stop-scan').disabled  = false;
+    document.getElementById('angle-display').textContent = '0.0°';
+    document.getElementById('progress-fill').style.width = '0%';
+    document.getElementById('info-photos').textContent =
+      `0 / ${Math.round(360 / (config.degrees_per_step || 7.5))}`;
+
+    if (data.mode === 'auto') {
+      setScanStatus('Arduino connected.\nScan running automatically...');
+      document.getElementById('btn-capture').disabled = true;
+    } else {
+      setScanStatus('Rotate table then click\nTABLE ROTATED');
+      document.getElementById('btn-capture').disabled = false;
+    }
+  }
+}
+
+async function captureFrame() {
+  const res  = await fetch('/api/scan/capture', { method: 'POST' });
+  const data = await res.json();
+  if (data.status === 'ok') {
+    const angle = data.next_angle || 0;
+    document.getElementById('angle-display').textContent = angle.toFixed(1) + '°';
+    document.getElementById('header-angle').textContent  = `${angle.toFixed(1)}° / 360°`;
+    document.getElementById('progress-fill').style.width = (angle / 360 * 100) + '%';
+    setScanStatus(`Photo taken at ${data.angle.toFixed(1)}°\nRotate table ${config.degrees_per_step || 7.5}° then click TAKE PHOTO`);
+  } else if (data.status === 'complete') {
+    setScanStatus('✔ Scan complete!');
+  }
+}
+
+async function stopScan() {
+  await fetch('/api/scan/stop', { method: 'POST' });
+  setDot('dot-scan', false);
+  document.getElementById('btn-start-scan').disabled = false;
+  document.getElementById('btn-stop-scan').disabled  = true;
+  document.getElementById('btn-capture').disabled    = true;
+  setScanStatus('Scan stopped');
+}
+
+// ── Pointcloud viewer (Tab 1) ──────────────────────────────────
+let pcdScene, pcdCamera, pcdRenderer, pcdPoints, pcdBbox, pcdGroup;
+let pcdDragging = false, pcdLast = {x:0,y:0};
+let pcdRotX = 0, pcdRotY = 0, pcdZoom = 5;
+
+function createBboxHelper(scene) {
+  // Bounding box: matches app.py exactly
+  // (-0.40, -0.40, 0.01) to (0.40, 0.40, 0.60)
+  const xMin=-0.40, xMax=0.40;
+  const yMin=-0.40, yMax=0.40;
+  const zMin= 0.01, zMax=0.60;
+
+  const vertices = new Float32Array([
+    // Bottom face
+    xMin,yMin,zMin, xMax,yMin,zMin,
+    xMax,yMin,zMin, xMax,yMax,zMin,
+    xMax,yMax,zMin, xMin,yMax,zMin,
+    xMin,yMax,zMin, xMin,yMin,zMin,
+    // Top face
+    xMin,yMin,zMax, xMax,yMin,zMax,
+    xMax,yMin,zMax, xMax,yMax,zMax,
+    xMax,yMax,zMax, xMin,yMax,zMax,
+    xMin,yMax,zMax, xMin,yMin,zMax,
+    // Verticals
+    xMin,yMin,zMin, xMin,yMin,zMax,
+    xMax,yMin,zMin, xMax,yMin,zMax,
+    xMax,yMax,zMin, xMax,yMax,zMax,
+    xMin,yMax,zMin, xMin,yMax,zMax,
+  ]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+  const mat = new THREE.LineBasicMaterial({ color: 0x00ff44, opacity: 0.7, transparent: true });
+  const bbox = new THREE.LineSegments(geo, mat);
+
+  // Turntable centre cross at origin (0,0,0)
+  const crossVerts = new Float32Array([
+    -0.05, 0, 0,  0.05, 0, 0,
+     0, -0.05, 0, 0, 0.05, 0,
+  ]);
+  const crossGeo = new THREE.BufferGeometry();
+  crossGeo.setAttribute('position', new THREE.BufferAttribute(crossVerts, 3));
+  const crossMat = new THREE.LineBasicMaterial({ color: 0xff2200 });
+  const cross = new THREE.LineSegments(crossGeo, crossMat);
+
+  // Floor plane grid at z=0
+  const gridHelper = new THREE.GridHelper(0.80, 8, 0x224422, 0x113311);
+  gridHelper.rotation.x = Math.PI / 2; // Rotate to XY plane (Z up)
+
+  scene.add(bbox);
+  scene.add(cross);
+  scene.add(gridHelper);
+  return bbox;
+}
+
+function initPointcloudViewer() {
+  const canvas = document.getElementById('pcd-canvas');
+  const box    = document.getElementById('pcd-box');
+  const W = box.clientWidth  || 300;
+  const H = box.clientHeight || 300;
+
+  pcdScene    = new THREE.Scene();
+  pcdGroup    = new THREE.Group(); // Group holds points so rotation affects all together
+  pcdScene.add(pcdGroup);
+
+  pcdCamera   = new THREE.PerspectiveCamera(60, W/H, 0.001, 100);
+  pcdCamera.position.set(0, 0, pcdZoom);
+  pcdRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  pcdRenderer.setSize(W, H);
+  pcdRenderer.setClearColor(0x000000);
+
+  // Add bounding box to scene
+  createBboxHelper(pcdGroup);
+
+  canvas.addEventListener('mousedown', e => { pcdDragging=true; pcdLast={x:e.clientX,y:e.clientY}; });
+  canvas.addEventListener('mouseup',   () => pcdDragging=false);
+  canvas.addEventListener('mousemove', e => {
+    if (!pcdDragging) return;
+    pcdRotY += (e.clientX - pcdLast.x) * 0.01;
+    pcdRotX += (e.clientY - pcdLast.y) * 0.01;
+    pcdLast = {x:e.clientX,y:e.clientY};
+  });
+  canvas.addEventListener('wheel', e => {
+    pcdZoom += e.deltaY * 0.01;
+    pcdZoom = Math.max(0.5, Math.min(20, pcdZoom));
+  });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    pcdGroup.rotation.x = pcdRotX;
+    pcdGroup.rotation.y = pcdRotY;
+    pcdCamera.position.z = pcdZoom;
+    pcdRenderer.render(pcdScene, pcdCamera);
+  }
+  animate();
+}
+
+function updatePointcloudViewer(data) {
+  if (!pcdScene) return;
+  if (pcdPoints) pcdGroup.remove(pcdPoints);
+  if (!data.points || data.points.length === 0) return;
+
+  const positions = new Float32Array(data.points.flat());
+  const colors    = data.colors && data.colors.length > 0
+    ? new Float32Array(data.colors.flat())
+    : new Float32Array(data.points.length * 3).fill(0.5);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+
+  const mat = new THREE.PointsMaterial({ size: 0.003, vertexColors: true });
+  pcdPoints = new THREE.Points(geo, mat);
+  pcdGroup.add(pcdPoints);
+}
+
+// ── Select viewer (Tab 2) ──────────────────────────────────────
+let selScene, selCamera, selRenderer, selPoints;
+let selDragging = false, selLast = {x:0,y:0};
+let selRotX = 0, selRotY = 0, selZoom = 5;
+let selPainting  = false;
+let currentBrush = 'clean';
+let brushSize    = 20;
+let paintColors  = null;
+let pointLabels  = null;
+let rawPoints    = null;
+
+function initSelectViewer() {
+  const canvas = document.getElementById('select-canvas');
+  const wrap   = document.getElementById('select-canvas-wrap');
+  const W = wrap.clientWidth  || 800;
+  const H = wrap.clientHeight || 600;
+
+  selScene    = new THREE.Scene();
+  selCamera   = new THREE.PerspectiveCamera(60, W/H, 0.001, 100);
+  selCamera.position.set(0, 0, selZoom);
+  selRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  selRenderer.setSize(W, H);
+  selRenderer.setClearColor(0x000813);
+
+  canvas.addEventListener('mousedown', e => {
+    if (e.shiftKey) { selPainting=true; paint(e); }
+    else { selDragging=true; selLast={x:e.clientX,y:e.clientY}; }
+  });
+  canvas.addEventListener('mouseup',   () => { selDragging=false; selPainting=false; });
+  canvas.addEventListener('mousemove', e => {
+    if (selPainting) { paint(e); return; }
+    if (!selDragging) return;
+    selRotY += (e.clientX - selLast.x) * 0.01;
+    selRotX += (e.clientY - selLast.y) * 0.01;
+    selLast = {x:e.clientX,y:e.clientY};
+  });
+  canvas.addEventListener('wheel', e => {
+    selZoom += e.deltaY*0.01;
+    selZoom = Math.max(0.5,Math.min(20,selZoom));
+  });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    if (selPoints) { selPoints.rotation.x=selRotX; selPoints.rotation.y=selRotY; }
+    selCamera.position.z = selZoom;
+    selRenderer.render(selScene, selCamera);
+  }
+  animate();
+}
+
+function updateSelectViewer(data) {
+  if (!selScene || !data.points || data.points.length === 0) return;
+  rawPoints   = data.points;
+  paintColors = new Float32Array(data.points.length * 3).fill(0.4);
+  pointLabels = new Int8Array(data.points.length);
+  rebuildSelectPoints();
+}
+
+function rebuildSelectPoints() {
+  if (selPoints) selScene.remove(selPoints);
+  if (!rawPoints) return;
+  const positions = new Float32Array(rawPoints.flat());
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(paintColors.slice(), 3));
+  const mat = new THREE.PointsMaterial({ size: 0.004, vertexColors: true });
+  selPoints = new THREE.Points(geo, mat);
+  selScene.add(selPoints);
+}
+
+function paint(e) {
+  if (!rawPoints || !selPoints) return;
+  const canvas = document.getElementById('select-canvas');
+  const rect   = canvas.getBoundingClientRect();
+  const mx = ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+  const my = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+
+  const projMatrix = new THREE.Matrix4().multiplyMatrices(
+    selCamera.projectionMatrix,
+    new THREE.Matrix4().multiplyMatrices(
+      selCamera.matrixWorldInverse, selPoints.matrixWorld));
+
+  const brushR = brushSize / canvas.width * 2;
+  const col   = currentBrush === 'clean' ? [1,0.2,0.2] :
+                currentBrush === 'avoid' ? [0.2,0.5,1] : [0.4,0.4,0.4];
+  const label = currentBrush === 'clean' ? 1 : currentBrush === 'avoid' ? 2 : 0;
+  let changed = false;
+
+  for (let i = 0; i < rawPoints.length; i++) {
+    const v = new THREE.Vector4(rawPoints[i][0], rawPoints[i][1], rawPoints[i][2], 1);
+    v.applyMatrix4(projMatrix);
+    const sx = v.x / v.w, sy = v.y / v.w;
+    if (Math.sqrt((sx-mx)**2 + (sy-my)**2) < brushR) {
+      paintColors[i*3]   = col[0];
+      paintColors[i*3+1] = col[1];
+      paintColors[i*3+2] = col[2];
+      pointLabels[i] = label;
+      changed = true;
+    }
+  }
+  if (changed) {
+    selPoints.geometry.attributes.color.array.set(paintColors);
+    selPoints.geometry.attributes.color.needsUpdate = true;
+  }
+}
+
+function setBrush(type) {
+  currentBrush = type;
+  ['clean','avoid','erase'].forEach(t => {
+    document.getElementById('btn-brush-' + t).classList.toggle('active', t === type);
+  });
+}
+
+function clearPaint() {
+  if (!paintColors) return;
+  paintColors.fill(0.4);
+  pointLabels.fill(0);
+  selPoints.geometry.attributes.color.array.set(paintColors);
+  selPoints.geometry.attributes.color.needsUpdate = true;
+}
+
+async function exportSTLs() {
+  if (!pointLabels || !rawPoints) {
+    alert('No pointcloud to export. Complete a scan first.');
+    return;
+  }
+  const cleanIdx = [], avoidIdx = [];
+  for (let i = 0; i < pointLabels.length; i++) {
+    if (pointLabels[i] === 1) cleanIdx.push(i);
+    else if (pointLabels[i] === 2) avoidIdx.push(i);
+  }
+  if (cleanIdx.length === 0 && avoidIdx.length === 0) {
+    alert('Paint some areas first using Shift+drag.');
+    return;
+  }
+  document.getElementById('export-status').textContent = 'Generating STLs...\nThis may take a minute.';
+  document.getElementById('btn-export').disabled = true;
+
+  const res  = await fetch('/api/export/stl', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ clean_indices: cleanIdx, avoid_indices: avoidIdx })
+  });
+  const data = await res.json();
+  document.getElementById('btn-export').disabled = false;
+  if (data.status === 'ok') {
+    document.getElementById('export-status').textContent =
+      `✔ Exported!\nClean: ${cleanIdx.length} pts\nAvoid: ${avoidIdx.length} pts\nSent to MoveIt`;
+    updateSceneObjects();
+  } else {
+    document.getElementById('export-status').textContent = '✗ Export failed';
+  }
+}
+
+// ── Robot viewer (Tab 3) ───────────────────────────────────────
+let robotScene, robotCamera, robotRenderer;
+let robDragging = false, robLast = {x:0,y:0};
+let robRotX = 0.3, robRotY = 0.5, robZoom = 3;
+let sceneObjects = [];
+
+function initRobotViewer() {
+  const canvas = document.getElementById('robot-canvas');
+  const wrap   = document.getElementById('robot-canvas-wrap');
+  const W = wrap.clientWidth  || 800;
+  const H = wrap.clientHeight || 600;
+
+  robotScene    = new THREE.Scene();
+  robotCamera   = new THREE.PerspectiveCamera(60, W/H, 0.01, 100);
+  robotCamera.position.set(0, 0, robZoom);
+  robotRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  robotRenderer.setSize(W, H);
+  robotRenderer.setClearColor(0x000813);
+
+  const grid = new THREE.GridHelper(2, 20, 0x333355, 0x222233);
+  robotScene.add(grid);
+  drawSimpleRobot();
+  robotScene.add(new THREE.AmbientLight(0x334455, 2));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+  dirLight.position.set(5, 5, 5);
+  robotScene.add(dirLight);
+
+  canvas.addEventListener('mousedown', e => { robDragging=true; robLast={x:e.clientX,y:e.clientY}; });
+  canvas.addEventListener('mouseup',   () => robDragging=false);
+  canvas.addEventListener('mousemove', e => {
+    if (!robDragging) return;
+    robRotY += (e.clientX-robLast.x)*0.01;
+    robRotX += (e.clientY-robLast.y)*0.01;
+    robLast = {x:e.clientX,y:e.clientY};
+  });
+  canvas.addEventListener('wheel', e => {
+    robZoom += e.deltaY*0.01;
+    robZoom = Math.max(1,Math.min(10,robZoom));
+  });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    robotScene.rotation.y = robRotY;
+    robotScene.rotation.x = robRotX;
+    robotCamera.position.z = robZoom;
+    robotRenderer.render(robotScene, robotCamera);
+  }
+  animate();
+}
+
+function drawSimpleRobot() {
+  const mat      = new THREE.MeshPhongMaterial({ color: 0x2266aa, shininess: 80 });
+  const matJoint = new THREE.MeshPhongMaterial({ color: 0x334455 });
+
+  const addBox = (w,h,d,x,y,z,m=mat) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), m);
+    mesh.position.set(x,y,z);
+    robotScene.add(mesh);
+  };
+  const addCyl = (r,h,x,y,z) => {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,16), matJoint);
+    mesh.position.set(x,y,z);
+    robotScene.add(mesh);
+  };
+
+  addBox(0.2,0.05,0.2,  0,0,0);
+  addCyl(0.06,0.06,      0,0.055,0);
+  addBox(0.06,0.3,0.06,  0,0.18,0);
+  addCyl(0.05,0.05,      0,0.35,0);
+  addBox(0.05,0.25,0.05, 0.12,0.42,0);
+  addCyl(0.04,0.04,      0.24,0.42,0);
+  addBox(0.04,0.15,0.04, 0.24,0.56,0);
+  addBox(0.03,0.06,0.03, 0.24,0.67,0);
+}
+
+function addSceneObject(name, color, x, y, z) {
+  const geo  = new THREE.BoxGeometry(0.1,0.1,0.1);
+  const mat  = new THREE.MeshPhongMaterial({ color, transparent:true, opacity:0.6 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y+0.05, z);
+  mesh.userData.name = name;
+  robotScene.add(mesh);
+  const wMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, wireframe:true }));
+  mesh.add(wMesh);
+  sceneObjects.push(mesh);
+  updateSceneObjects();
+}
+
+function updateSceneObjects() {
+  const el = document.getElementById('scene-objects');
+  el.innerHTML = sceneObjects.length === 0
+    ? 'No objects in scene'
+    : sceneObjects.map(o => `<div style="color:var(--text)">◈ ${o.userData.name}</div>`).join('');
+}
+
+async function sendToMoveIt(type) {
+  const x = +document.getElementById('obj-x').value;
+  const y = +document.getElementById('obj-y').value;
+  const z = +document.getElementById('obj-z').value;
+  const path  = type === 'clean'
+    ? (config.clean_stl_path || '~/scan_clean.stl')
+    : (config.avoid_stl_path || '~/scan_avoid.stl');
+  const name  = type === 'clean' ? 'clean_zone' : 'avoid_zone';
+  const color = type === 'clean' ? 0xff4444 : 0x4488ff;
+
+  document.getElementById('moveit-status').textContent = `Sending ${type} zone to MoveIt...`;
+  const res  = await fetch('/api/moveit/send', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ path, name, x, y, z })
+  });
+  const data = await res.json();
+  if (data.status === 'ok') {
+    document.getElementById('moveit-status').textContent = `✔ ${name} added to MoveIt scene`;
+    addSceneObject(name, color, x, y, z);
+  } else {
+    document.getElementById('moveit-status').textContent = `✗ Failed — is ROS2 running?`;
+  }
+}
+
+async function clearMoveItScene() {
+  sceneObjects.forEach(o => robotScene.remove(o));
+  sceneObjects = [];
+  updateSceneObjects();
+  document.getElementById('moveit-status').textContent = 'Scene cleared';
+}
+
+function resizeSelectCanvas() {
+  if (!selRenderer) return;
+  const wrap = document.getElementById('select-canvas-wrap');
+  selRenderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  selCamera.aspect = wrap.clientWidth / wrap.clientHeight;
+  selCamera.updateProjectionMatrix();
+}
+
+function resizeRobotCanvas() {
+  if (!robotRenderer) return;
+  const wrap = document.getElementById('robot-canvas-wrap');
+  robotRenderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  robotCamera.aspect = wrap.clientWidth / wrap.clientHeight;
+  robotCamera.updateProjectionMatrix();
+}
+
+// ── Settings ───────────────────────────────────────────────────
+function applyConfigToSettings(cfg) {
+  document.getElementById('s-camera-height').value    = cfg.camera_height_m   || 0.165;
+  document.getElementById('s-camera-distance').value  = cfg.camera_distance_m || 0.258;
+  document.getElementById('s-camera-tilt').value      = cfg.camera_tilt_deg   || 112.5;
+  document.getElementById('s-degrees-step').value     = cfg.degrees_per_step  || 7.5;
+  document.getElementById('s-arduino-port').value     = cfg.arduino_port      || '/dev/ttyACM0';
+  document.getElementById('s-arduino-enabled').value  = cfg.arduino_enabled ? 'true' : 'false';
+  document.getElementById('s-robot-ip').value         = cfg.robot_ip          || '192.168.0.43';
+  document.getElementById('s-clean-path').value       = cfg.clean_stl_path    || '~/scan_clean.stl';
+  document.getElementById('s-avoid-path').value       = cfg.avoid_stl_path    || '~/scan_avoid.stl';
+  document.getElementById('info-step').textContent    = (cfg.degrees_per_step || 7.5) + '°';
+}
+
+async function saveSettings() {
+  const newConfig = {
+    camera_height_m:   +document.getElementById('s-camera-height').value,
+    camera_distance_m: +document.getElementById('s-camera-distance').value,
+    camera_tilt_deg:   +document.getElementById('s-camera-tilt').value,
+    degrees_per_step:  +document.getElementById('s-degrees-step').value,
+    arduino_port:      document.getElementById('s-arduino-port').value,
+    arduino_enabled:   document.getElementById('s-arduino-enabled').value === 'true',
+    robot_ip:          document.getElementById('s-robot-ip').value,
+    clean_stl_path:    document.getElementById('s-clean-path').value,
+    avoid_stl_path:    document.getElementById('s-avoid-path').value,
+  };
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(newConfig)
+  });
+  config = newConfig;
+  arduinoEnabled = newConfig.arduino_enabled;
+  updateArduinoUI();
+  document.getElementById('info-step').textContent = newConfig.degrees_per_step + '°';
+  const msg = document.getElementById('save-msg');
+  msg.style.display = 'inline';
+  setTimeout(() => msg.style.display = 'none', 2000);
+}
+
+async function resetSettings() {
+  if (!confirm('Reset all settings to defaults?')) return;
+  const defaults = {
+    camera_height_m: 0.165, camera_distance_m: 0.258,
+    camera_tilt_deg: 112.5, degrees_per_step: 7.5,
+    arduino_port: '/dev/ttyACM0', arduino_enabled: true,
+    robot_ip: '192.168.0.43',
+    clean_stl_path: '~/scan_clean.stl', avoid_stl_path: '~/scan_avoid.stl'
+  };
+  applyConfigToSettings(defaults);
+  await fetch('/api/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(defaults)
+  });
+}
+
+// ── Init ───────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  initPointcloudViewer();
+  initSelectViewer();
+  initRobotViewer();
+  socket.emit('request_pointcloud');
+});
+
+window.addEventListener('resize', () => {
+  resizeSelectCanvas();
+  resizeRobotCanvas();
+});
+</script>
+</body>
+</html>
