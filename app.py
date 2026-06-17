@@ -21,12 +21,14 @@ import serial
 #  CONFIGURATION (also editable via Settings UI)
 # ─────────────────────────────────────────────
 CONFIG = {
-    "depth_max_m": 0.75,  # ignore anything further than this from camera
-    "camera_height_m":    0.24,
-    "camera_distance_m":  0.52,
-    "camera_tilt_deg":    22.5,
+    "depth_max_m": 1.00,  # ignore anything further than this from camera
+    "camera_height_m":    0.255,
+    "camera_distance_m":  0.67,
+    "camera_tilt_deg":    25.0,
     "camera_x_offset_m":  0.0,
     "camera_y_offset_m":  0.0,
+    "turntable_x_offset_m": 0.0,
+    "turntable_y_offset_m": 0.0,
     "degrees_per_step":   8,
     "camera_width":       1280,
     "camera_height":      720,
@@ -37,6 +39,13 @@ CONFIG = {
     "robot_port":         50002,
     "clean_stl_path":     os.path.expanduser("~/scan_clean.stl"),
     "avoid_stl_path":     os.path.expanduser("~/scan_avoid.stl"),
+    "path_planning_script": os.path.expanduser(
+        "~/Documents/SMR/Scan/STLFiles/path_planning.py"),
+    "environment_setup_script": os.path.expanduser(
+        "~/Documents/SMR/Scan/STLFiles/environment_setup.py"),
+    "ur_network_iface":   "enp5s0",
+    "ur_host_ip":         "192.168.0.100/24",
+    "ur_type":            "ur10",
     # RealSense depth sensor settings
     "rs_laser_power":     150,   # IR projector brightness 0-360 mW
     "rs_confidence":      1,     # depth confidence threshold 0-3
@@ -45,7 +54,7 @@ CONFIG = {
 }
 
 CONFIG_PATH = os.path.expanduser("~/scanner_config.json")
-GENERATED_MODELS_DIR = r"C:\Users\Arnoud\Documents\HHS\MINOR SMR\SMR-DERCPressureWash\generated_models"
+GENERATED_MODELS_DIR = os.path.expanduser("~/scan_models")
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'scanner3d'
@@ -61,6 +70,7 @@ state = {
     "snapshot":        None,
     "clean_stl":       None,
     "avoid_stl":       None,
+    "primitive_stl":   None,   # last exported primitive/hull STL for viz
     "colored_pcd":     None,
 }
 
@@ -91,7 +101,9 @@ def arduino_rotate():
         return True
     try:
         with arduino_lock:
-            arduino_serial.write(b"ROTATE\n")
+            degrees = CONFIG["degrees_per_step"]
+            cmd = f"DEG:{degrees}\n".encode()
+            arduino_serial.write(cmd)
             arduino_serial.flush()
             while True:
                 line = arduino_serial.readline().decode().strip()
@@ -216,6 +228,8 @@ def stop_camera():
             pipeline = None
 
 def preview_loop():
+    global scan_intrinsic
+    o3d_mod = get_open3d()
     while state["preview_running"]:
         try:
             with pipe_lock:
@@ -227,9 +241,27 @@ def preview_loop():
                 if not color_f:
                     continue
                 color_img = np.asanyarray(color_f.get_data())
+
+                # Build intrinsic from the live frame as soon as possible so
+                # the bbox overlay is available immediately in the preview,
+                # without needing to start a scan first.
+                if scan_intrinsic is None and o3d_mod is not None:
+                    profile = frameset.get_profile()
+                    intr    = profile.as_video_stream_profile().get_intrinsics()
+                    scan_intrinsic = o3d_mod.camera.PinholeCameraIntrinsic(
+                        intr.width, intr.height,
+                        intr.fx, intr.fy, intr.ppx, intr.ppy)
+
             state["last_frame"] = color_img
+
+            # Draw bbox overlay so the operator can frame the object before scanning
+            if scan_intrinsic is not None:
+                display_img = draw_bbox_on_image(color_img, scan_intrinsic, 0)
+            else:
+                display_img = color_img
+
             _, buf = cv2.imencode('.jpg',
-                                  cv2.cvtColor(color_img, cv2.COLOR_RGB2BGR),
+                                  cv2.cvtColor(display_img, cv2.COLOR_RGB2BGR),
                                   [cv2.IMWRITE_JPEG_QUALITY, 70])
             b64 = base64.b64encode(buf).decode('utf-8')
             socketio.emit('camera_frame', {'image': b64})
@@ -241,28 +273,46 @@ def preview_loop():
 
 def get_camera_extrinsics():
     dtr  = np.pi / 180
-    # 25° below horizontal = rotate camera downward by 25°
-    tilt = CONFIG["camera_tilt_deg"] * dtr  # positive = downward tilt
+    tilt = CONFIG["camera_tilt_deg"] * dtr  # positive = nose down
 
-    d = CONFIG["camera_distance_m"]
-    cam_x_offset = CONFIG.get("camera_x_offset_m", -0.15)
+    d            = CONFIG["camera_distance_m"]
+    cam_x_offset = CONFIG.get("camera_x_offset_m", 0.0)
     cam_y_offset = CONFIG.get("camera_y_offset_m", 0.0)
 
+    # Camera position in world space:
+    #   X = lateral offset (0 = centred on turntable axis)
+    #   Y = -distance      (camera sits at -Y, looking toward +Y / origin)
+    #   Z = height above turntable surface
     t = np.array([
         cam_x_offset,
         -d + cam_y_offset,
         CONFIG["camera_height_m"]
     ])
 
-    # Camera faces +Y (toward turntable), tilted downward around X axis
-    # tilt > 0 means nose down
-    R_tilt = np.array([
-        [1,            0,           0],
-        [0,  np.cos(tilt), np.sin(tilt)],
-        [0, -np.sin(tilt), np.cos(tilt)],
+    # RealSense / Open3D camera convention: +X right, +Y down, +Z forward
+    # World convention: +X right, +Y toward camera, +Z up
+    #
+    # R_base columns = world-space directions of cam +X, +Y, +Z:
+    #   cam+X → world +X  : (1, 0,  0)
+    #   cam+Y → world -Z  : (0, 0, -1)   (camera down  = world -Z)
+    #   cam+Z → world +Y  : (0, 1,  0)   (camera fwd   = toward turntable = world +Y)
+    R_base = np.array([
+        [1,  0,  0],
+        [0,  0,  1],
+        [0, -1,  0],
     ])
 
-    return R_tilt, t
+    # Tilt: nose-down rotation around world X axis (applied after R_base)
+    R_tilt = np.array([
+        [1,            0,             0],
+        [0,  np.cos(tilt),  np.sin(tilt)],
+        [0, -np.sin(tilt),  np.cos(tilt)],
+    ])
+
+    # Combined: align axes first, then tilt
+    R = R_tilt @ R_base
+
+    return R, t
 
 def process_frame_to_pcd(color_img, depth_img, angle_deg, intrinsic):
     o3d = get_open3d()
@@ -312,21 +362,26 @@ def process_frame_to_pcd(color_img, depth_img, angle_deg, intrinsic):
     pcd.translate(t)
 
     # Step 2: counter-rotate by turntable angle around world Z axis
-    # This "unspins" each frame so all frames align in a common world space
+    # This "unspins" each frame so all frames align in a common world space.
+    # Sign convention: positive angle_deg = turntable rotates counter-clockwise
+    # when viewed from above (standard right-hand rule around +Z).
+    # If scans come out as a ring instead of stacking, flip the sign here.
     dtr = np.pi / 180
-    a   = -angle_deg * dtr  # negative = counter-rotate
+    a   = -angle_deg * dtr  # positive = counter-clockwise unspin
     R_unspin = np.array([
         [ np.cos(a), -np.sin(a), 0],
         [ np.sin(a),  np.cos(a), 0],
         [         0,          0, 1],
     ])
-    # Rotate around turntable centre (world origin in XY)
-    pcd.rotate(R_unspin, center=(0, 0, 0))
+    # Rotate around turntable centre (tunable offset if table isn't at world origin)
+    tt_x = CONFIG.get("turntable_x_offset_m", 0.0)
+    tt_y = CONFIG.get("turntable_y_offset_m", 0.0)
+    pcd.rotate(R_unspin, center=(tt_x, tt_y, 0))
 
     # Crop to bbox
     bbox = o3d.geometry.AxisAlignedBoundingBox(
-        (-0.40, -0.40, -0.005),
-        ( 0.40,  0.40, 0.80)
+        (-0.40, -0.40, 0),
+        ( 0.40,  0.40,  0.80)
     )
     pcd = pcd.crop(bbox)
 
@@ -347,7 +402,7 @@ def draw_bbox_on_image(color_img, intrinsic, angle_deg):
     """
     x_min, x_max = -0.40, 0.40
     y_min, y_max = -0.40, 0.40
-    z_min, z_max =  0.01, 0.60
+    z_min, z_max =  0.00, 0.65
 
     corners = np.array([
         [x_min, y_min, z_min], [x_max, y_min, z_min],
@@ -443,7 +498,7 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
 
         # ── 4. Density trim (floaters only) ───────────────────
         dens = np.asarray(densities)
-        mesh.remove_vertices_by_mask(dens < np.percentile(dens, 5))
+        mesh.remove_vertices_by_mask(dens < np.percentile(dens, 1))
         print(f"[STL] After density trim: {len(mesh.triangles)} triangles")
 
         # ── 5. Largest connected component ────────────────────
@@ -471,7 +526,7 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
         verts = np.asarray(mesh.vertices).astype(np.float32)
         query = o3d.core.Tensor(verts, dtype=o3d.core.Dtype.Float32)
         signed_dist = hull_scene.compute_signed_distance(query).numpy()
-        mesh.remove_vertices_by_mask(signed_dist > 0.010)
+        mesh.remove_vertices_by_mask(signed_dist > 0.020)
         print(f"[STL] After hull crop: {len(mesh.triangles)} triangles")
         if len(mesh.triangles) == 0:
             print("[STL] Empty mesh after hull crop — aborting")
@@ -518,7 +573,7 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
         import traceback; traceback.print_exc()
         return None
 
-def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hull_detail=50, lowpoly_tris=200):
+def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hull_detail=50, lowpoly_tris=200, save_mm=True):
     """
     Fit a geometric primitive to the point cloud and export as STL.
     Produces a very clean mesh with under 100 triangles, ideal for
@@ -647,44 +702,125 @@ def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hul
                   f"(detail={hull_detail:.0f})")
 
         elif primitive == "lowpoly":
-            # Load the already-exported full surface STL and decimate it.
-            # The source file is already clean, cropped, and in mm, so
-            # we just collapse triangles to the target count and write out.
+            # Low-poly surface using the same proven Poisson pipeline as
+            # make_stl_from_pcd, then decimated to the triangle target.
             if output_path is None:
-                src = CONFIG["clean_stl_path"] if label == "clean" else CONFIG["avoid_stl_path"]
-                src = os.path.expanduser(src)
-                lp_path = src
+                lp_path = os.path.expanduser(
+                    CONFIG["clean_stl_path"] if label == "clean" else CONFIG["avoid_stl_path"])
             else:
-                src = output_path.replace(f"_lowpoly_{label}.stl", f"_{label}.stl")
                 lp_path = output_path
-            if not os.path.exists(src):
-                raise RuntimeError(
-                    f"Low-poly requires the full surface STL to exist first.\n"
-                    f"Use 'BOTH + PREVIEW' to export both together.\n"
-                    f"Expected: {src}")
-            mesh = o3d.io.read_triangle_mesh(src)
-            mesh.remove_degenerate_triangles()
-            mesh.remove_duplicated_vertices()
-            n_before = len(mesh.triangles)
-            if n_before > lowpoly_tris:
+
+            # ── 1. Downsample & outlier removal ───────────────────
+            pcd_lp = pcd_clean.voxel_down_sample(voxel_size=0.004)
+            pcd_lp, _ = pcd_lp.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+            n_before = len(np.asarray(pcd_lp.points))
+            print(f"[STL] lowpoly: {n_before} points after cleanup")
+            if n_before < 100:
+                print("[STL] lowpoly: not enough points")
+                return None
+
+            # ── 2. Normal estimation ───────────────────────────────
+            pcd_lp.estimate_normals(
+                search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.03, max_nn=50))
+            cam = np.array([0.0, -CONFIG["camera_distance_m"], CONFIG["camera_height_m"]])
+            pcd_lp.orient_normals_towards_camera_location(camera_location=cam)
+
+            # ── 3. Poisson reconstruction ──────────────────────────
+            mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                pcd_lp, depth=8, width=0, scale=1.1, linear_fit=False)
+            print(f"[STL] lowpoly Poisson raw: {len(mesh.triangles)} triangles")
+
+            # ── 4. Density trim ────────────────────────────────────
+            dens = np.asarray(densities)
+            mesh.remove_vertices_by_mask(dens < np.percentile(dens, 25))
+
+            # ── 5. Largest connected component ─────────────────────
+            tri_clusters, cluster_n_tris, _ = mesh.cluster_connected_triangles()
+            tri_clusters   = np.asarray(tri_clusters)
+            cluster_n_tris = np.asarray(cluster_n_tris)
+            mesh.remove_triangles_by_mask(tri_clusters != cluster_n_tris.argmax())
+            mesh.remove_unreferenced_vertices()
+            if len(mesh.triangles) == 0:
+                print("[STL] lowpoly: empty after component filter")
+                return None
+
+            # ── 6. Convex hull crop ────────────────────────────────
+            hull, _ = pcd_lp.compute_convex_hull()
+            hull_scene = o3d.t.geometry.RaycastingScene()
+            hull_scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(hull))
+            verts = np.asarray(mesh.vertices).astype(np.float32)
+            signed_dist = hull_scene.compute_signed_distance(
+                o3d.core.Tensor(verts, dtype=o3d.core.Dtype.Float32)).numpy()
+            mesh.remove_vertices_by_mask(signed_dist > 0.020)
+            if len(mesh.triangles) == 0:
+                print("[STL] lowpoly: empty after hull crop")
+                return None
+
+            # ── 7. Decimate to target triangle count ───────────────
+            mesh = mesh.filter_smooth_taubin(number_of_iterations=5)
+            if len(mesh.triangles) > lowpoly_tris:
                 mesh = mesh.simplify_quadric_decimation(
                     target_number_of_triangles=lowpoly_tris)
-                mesh = mesh.filter_smooth_taubin(number_of_iterations=5)
-                mesh.remove_degenerate_triangles()
-                mesh.remove_duplicated_vertices()
-            # Push vertices outward along normals to ensure the low-poly
-            # mesh sits slightly outside the real surface after decimation
-            # (decimation can pull vertices inward as it collapses edges).
-            # 5 mm in mm-space = 5.0 units.
-            mesh.compute_vertex_normals()
+            mesh.remove_degenerate_triangles()
+            mesh.remove_duplicated_vertices()
+            mesh.remove_non_manifold_edges()
+            print(f"[STL] lowpoly: {len(mesh.triangles)} tris (target {lowpoly_tris})")
+
+            # ── 8. Normal smoothing ────────────────────────────────
+            # Recompute normals with a large search radius so flat faces
+            # get a consistent perpendicular normal and cylinders get a
+            # smoothly varying one — without changing the geometry at all.
+            tris  = np.asarray(mesh.triangles)
             verts = np.asarray(mesh.vertices)
-            norms = np.asarray(mesh.vertex_normals)
-            mesh.vertices = o3d.utility.Vector3dVector(verts + norms * 5.0)
+
+            # Compute per-face normals and areas
+            v0 = verts[tris[:, 0]]; v1 = verts[tris[:, 1]]; v2 = verts[tris[:, 2]]
+            face_normals = np.cross(v1 - v0, v2 - v0)
+            face_areas   = np.linalg.norm(face_normals, axis=1, keepdims=True)
+            face_normals = face_normals / np.clip(face_areas, 1e-12, None)
+
+            # Build vertex → face adjacency
+            n_verts = len(verts)
+            vert_normal_acc = np.zeros((n_verts, 3))
+            vert_area_acc   = np.zeros(n_verts)
+            for fi, (i0, i1, i2) in enumerate(tris):
+                w = face_areas[fi, 0]
+                for vi in (i0, i1, i2):
+                    vert_normal_acc[vi] += face_normals[fi] * w
+                    vert_area_acc[vi]   += w
+
+            # Normalise accumulated normals
+            lengths = np.linalg.norm(vert_normal_acc, axis=1, keepdims=True)
+            smooth_normals = vert_normal_acc / np.clip(lengths, 1e-12, None)
+
+            # One pass of neighbour averaging for extra smoothness
+            smooth2 = np.zeros_like(smooth_normals)
+            counts  = np.zeros(n_verts)
+            for i0, i1, i2 in tris:
+                for vi, others in ((i0,(i1,i2)),(i1,(i0,i2)),(i2,(i0,i1))):
+                    smooth2[vi] += smooth_normals[vi]
+                    for vj in others:
+                        smooth2[vi] += smooth_normals[vj]
+                    counts[vi] += 3
+            counts = np.clip(counts, 1, None)
+            smooth2 = smooth2 / counts[:, None]
+            lengths2 = np.linalg.norm(smooth2, axis=1, keepdims=True)
+            smooth2  = smooth2 / np.clip(lengths2, 1e-12, None)
+
+            mesh.vertex_normals = o3d.utility.Vector3dVector(smooth2)
+            print(f"[STL] Normal smoothing applied")
+
+            # ── 9. Standoff offset ─────────────────────────────────
+            verts = np.asarray(mesh.vertices)
+            mesh.vertices = o3d.utility.Vector3dVector(verts + smooth2 * 0.002)
+
+            # save_mm=False from api_mesh_build; browser x1000 gives mm display
+            if save_mm:
+                mesh.scale(1000, center=(0, 0, 0))
             mesh.compute_vertex_normals()
             os.makedirs(os.path.dirname(lp_path), exist_ok=True)
             o3d.io.write_triangle_mesh(lp_path, mesh)
-            print(f"[STL] Low-poly: {n_before} -> {len(mesh.triangles)} tris "
-                  f"(+5 mm offset) -> {lp_path}")
+            print(f"[STL] lowpoly saved: {len(mesh.triangles)} tris -> {lp_path}")
             return lp_path
 
         else:
@@ -697,8 +833,9 @@ def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hul
         norms = np.asarray(mesh.vertex_normals)
         mesh.vertices = o3d.utility.Vector3dVector(verts + norms * 0.007)
 
-        # Scale to mm and write
-        mesh.scale(1000, center=(0, 0, 0))
+        # Scale to mm for MoveIt/RViz compatibility (unless caller wants metres)
+        if save_mm:
+            mesh.scale(1000, center=(0, 0, 0))
         mesh.compute_vertex_normals()
         if output_path is None:
             output_path = CONFIG["clean_stl_path"] if label == "clean" else CONFIG["avoid_stl_path"]
@@ -716,24 +853,56 @@ def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hul
 
 # ── ROS2 / MoveIt ─────────────────────────────────────────────
 
-def send_stl_to_moveit(stl_path, object_name, operation="add", x=0.5, y=0.0, z=0.2):
+def send_stl_to_moveit(stl_path, object_name, operation="add", x=None, y=0.0, z=None):
+    """
+    Publish an STL as a MoveIt collision object, correctly centred on the turntable.
+    Vertices are recentred to bbox centre, a 90° Z rotation is applied to align
+    scanner frame (Y=toward camera) with robot frame (Y=forward), then placed at
+    TURNTABLE_CENTRE_X, TURNTABLE_CENTRE_Y, TURNTABLE_TOP_Z + SCAN_FLOOR_CLIP_M + half_height.
+    """
+    TURNTABLE_CENTRE_X = 0.65
+    TURNTABLE_CENTRE_Y = 0.0
+    TURNTABLE_TOP_Z    = 0.038
+    SCAN_FLOOR_CLIP_M  = 0.03
+
     rclpy_mod = get_rclpy()
     if rclpy_mod is None:
         print("[WARN] ROS2 not available")
         return False
     try:
-        from moveit_msgs.msg   import CollisionObject, PlanningScene
+        from moveit_msgs.msg   import CollisionObject
         from shape_msgs.msg    import Mesh, MeshTriangle
         from geometry_msgs.msg import Pose, Point
         from std_msgs.msg      import Header
         import rclpy as rclpy_lib
         from rclpy.node import Node
 
-        vertices, triangles = read_stl_binary(stl_path)
+        raw_verts, triangles = read_stl_binary(stl_path)
+        verts_m = np.array(raw_verts, dtype=float) / 1000.0
+        bbox_min = verts_m.min(axis=0)
+        bbox_max = verts_m.max(axis=0)
+        bbox_centre = (bbox_min + bbox_max) / 2.0
+        bbox_size   = bbox_max - bbox_min
+        centred = verts_m - bbox_centre
+
+        angle = np.pi / 2.0
+        R_z90 = np.array([
+            [ np.cos(angle), -np.sin(angle), 0.0],
+            [ np.sin(angle),  np.cos(angle), 0.0],
+            [ 0.0,            0.0,           1.0],
+        ])
+        rotated = (R_z90 @ centred.T).T
+
+        pose_x = TURNTABLE_CENTRE_X
+        pose_y = TURNTABLE_CENTRE_Y
+        pose_z = TURNTABLE_TOP_Z + SCAN_FLOOR_CLIP_M + bbox_size[2] / 2.0
+        print(f"[ROS2] STL placement: x={pose_x:.3f} y={pose_y:.3f} z={pose_z:.3f}  "
+              f"(bbox {np.round(bbox_size*1000).astype(int)} mm)")
+
         mesh = Mesh()
-        for v in vertices:
+        for v in rotated:
             p = Point()
-            p.x, p.y, p.z = float(v[0])/1000.0, float(v[1])/1000.0, float(v[2])/1000.0
+            p.x, p.y, p.z = float(v[0]), float(v[1]), float(v[2])
             mesh.vertices.append(p)
         for tri in triangles:
             t = MeshTriangle()
@@ -749,24 +918,26 @@ def send_stl_to_moveit(stl_path, object_name, operation="add", x=0.5, y=0.0, z=0
 
         obj = CollisionObject()
         obj.header = Header()
-        obj.header.frame_id = "world"
+        obj.header.frame_id = "base_link"
         obj.header.stamp = node.get_clock().now().to_msg()
         obj.id = object_name
         obj.operation = CollisionObject.ADD if operation == "add" else CollisionObject.REMOVE
         obj.meshes.append(mesh)
         pose = Pose()
-        pose.position.x = float(x)
-        pose.position.y = float(y)
-        pose.position.z = float(z)
+        pose.position.x = pose_x
+        pose.position.y = pose_y
+        pose.position.z = pose_z
         pose.orientation.w = 1.0
         obj.mesh_poses.append(pose)
-        pub.publish(obj)
-        time.sleep(0.5)
+        for _ in range(5):
+            pub.publish(obj)
+            time.sleep(0.3)
         node.destroy_node()
         print(f"[ROS2] {operation.upper()} '{object_name}' in MoveIt scene")
         return True
     except Exception as e:
         print(f"[ERROR] MoveIt publish failed: {e}")
+        import traceback; traceback.print_exc()
         return False
 
 
@@ -928,11 +1099,11 @@ def auto_scan_loop():
                 'angle': state["current_angle"],
                 'next_angle': state["current_angle"]
             })
-            # Emit a live pointcloud update every 5 steps so the
-            # viewer builds up progressively during the scan
-            step = round(state["current_angle"] / CONFIG["degrees_per_step"])
-            if step % 5 == 0 and state["pointcloud"] is not None:
-                socketio.emit('pointcloud_update', pcd_to_json(state["pointcloud"]))
+            # Emit a live pointcloud update every 5 steps if enabled
+            if state.get("live_pcd_update", True):
+                step = round(state["current_angle"] / CONFIG["degrees_per_step"])
+                if step % 5 == 0 and state["pointcloud"] is not None:
+                    socketio.emit('pointcloud_update', pcd_to_json(state["pointcloud"]))
         else:
             print(f"[ERROR] Capture failed at {angle}°")
             break
@@ -998,6 +1169,11 @@ def api_stop_scan():
 def api_get_pointcloud():
     return jsonify(pcd_to_json(state["pointcloud"]))
 
+@app.route('/api/scan/live_update', methods=['POST'])
+def api_set_live_update():
+    state["live_pcd_update"] = bool(request.json.get("enabled", True))
+    return jsonify({'status': 'ok', 'live_pcd_update': state["live_pcd_update"]})
+
 @app.route('/api/export/stl', methods=['POST'])
 def api_export_stl():
     data      = request.json
@@ -1026,9 +1202,9 @@ def api_export_stl():
 
     results = {}
     if clean_result:
-        results['clean'] = send_stl_to_moveit(clean_result, "clean_zone", x=0.5, y=0.0, z=0.2)
+        results['clean'] = send_stl_to_moveit(clean_result, "clean_zone")
     if avoid_result:
-        results['avoid'] = send_stl_to_moveit(avoid_result, "avoid_zone", x=0.5, y=0.0, z=0.2)
+        results['avoid'] = send_stl_to_moveit(avoid_result, "avoid_zone")
     return jsonify({'status': 'ok', 'results': results,
                     'clean_path': clean_result, 'avoid_path': avoid_result,
                     'filename': safe_name if filename else None})
@@ -1081,20 +1257,738 @@ def api_export_primitive():
         clean_path = os.path.join(GENERATED_MODELS_DIR, f"{safe_name}_{primitive}_clean.stl")
         avoid_path = os.path.join(GENERATED_MODELS_DIR, f"{safe_name}_{primitive}_avoid.stl")
     results = {}
+    exported_clean = None
+    exported_avoid = None
     if clean_idx:
         r = fit_primitive_stl(pcd.select_by_index(clean_idx), primitive, "clean", clean_path, hull_detail, lowpoly_tris)
-        if r: results['clean'] = send_stl_to_moveit(r, "clean_zone", x=0.5, y=0.0, z=0.2)
+        if r:
+            exported_clean = r
+            results['clean'] = send_stl_to_moveit(r, "clean_zone")
     if avoid_idx:
         r = fit_primitive_stl(pcd.select_by_index(avoid_idx), primitive, "avoid", avoid_path, hull_detail, lowpoly_tris)
-        if r: results['avoid'] = send_stl_to_moveit(r, "avoid_zone", x=0.5, y=0.0, z=0.2)
-    return jsonify({'status': 'ok', 'results': results, 'filename': safe_name})
+        if r:
+            exported_avoid = r
+            results['avoid'] = send_stl_to_moveit(r, "avoid_zone")
+    if exported_clean:
+        state['primitive_stl'] = exported_clean
+        # Use the primitive as the primary STL for path planning — it's cleaner
+        # than the full surface and path_planning.py works correctly with it.
+        CONFIG['clean_stl_path'] = exported_clean
+    return jsonify({'status': 'ok', 'results': results, 'filename': safe_name,
+                    'clean_path': exported_clean, 'avoid_path': exported_avoid})
+
+@app.route('/api/mesh/build', methods=['POST'])
+def api_mesh_build():
+    """
+    Fit a primitive to the ENTIRE point cloud (no zone indices).
+    Saves the STL, stores its path in state, returns a download URL.
+    """
+    data         = request.json or {}
+    primitive    = data.get('primitive',    'hull')
+    hull_detail  = float(data.get('hull_detail',  50))
+    lowpoly_tris = int(data.get('lowpoly_tris',  200))
+    filename     = data.get('filename', '').strip()
+    o3d          = get_open3d()
+    if o3d is None or state['pointcloud'] is None:
+        return jsonify({'status': 'error', 'message': 'No point cloud — complete a scan first'})
+
+    safe_name = ("".join(c for c in os.path.splitext(filename)[0]
+                         if c.isalnum() or c in '-_ ').strip() or 'scan') if filename else 'scan'
+    os.makedirs(GENERATED_MODELS_DIR, exist_ok=True)
+    out_path = os.path.join(GENERATED_MODELS_DIR, f'{safe_name}_{primitive}_full.stl')
+
+    pcd = state['pointcloud']
+    result = fit_primitive_stl(pcd, primitive, 'clean', out_path, hull_detail, lowpoly_tris, save_mm=False)
+    if not result:
+        return jsonify({'status': 'error', 'message': 'Mesh build failed — check server log'})
+
+    # Count triangles
+    try:
+        mesh = o3d.io.read_triangle_mesh(result)
+        tri_count = len(mesh.triangles)
+    except Exception:
+        tri_count = 0
+
+    state['built_mesh_path'] = result
+    state['primitive_stl']   = result
+    CONFIG['clean_stl_path'] = result
+
+    return jsonify({
+        'status':       'ok',
+        'stl_path':     result,
+        'download_url': f'/api/mesh/download?path={result}',
+        'tri_count':    tri_count,
+    })
+
+
+@app.route('/api/mesh/download', methods=['GET'])
+def api_mesh_download():
+    """Serve a mesh STL file for the browser viewer."""
+    path = request.args.get('path', '')
+    path = os.path.expanduser(path)
+    if not path or not os.path.exists(path):
+        return jsonify({'status': 'error', 'message': 'File not found'}), 404
+    return send_file(path, mimetype='application/octet-stream',
+                     as_attachment=False, download_name=os.path.basename(path))
+
+
+@app.route('/api/mesh/upload', methods=['POST'])
+def api_mesh_upload():
+    """
+    Load a user-supplied STL directly into the MESH step, bypassing the
+    scan + point-cloud fitting. Lets the SELECT FACES / ROBOT CONTROL
+    steps be exercised against a known test STL while no scan is available
+    (e.g. testing path planning while a teammate works on the scanner).
+
+    Mirrors the response shape of /api/mesh/build so the frontend can reuse
+    the same downstream handling.
+    """
+    o3d = get_open3d()
+    if o3d is None:
+        return jsonify({'status': 'error', 'message': 'Open3D not available'})
+
+    f = request.files.get('stl_file')
+    if not f or not f.filename:
+        return jsonify({'status': 'error', 'message': 'No file uploaded'})
+
+    units    = request.form.get('units', 'mm')
+    filename = request.form.get('filename', '').strip()
+
+    safe_name = ("".join(c for c in os.path.splitext(filename)[0]
+                         if c.isalnum() or c in '-_ ').strip() or 'scan') if filename else 'scan'
+    os.makedirs(GENERATED_MODELS_DIR, exist_ok=True)
+
+    # Open3D needs a real file path to read from
+    tmp_path = os.path.join(GENERATED_MODELS_DIR, f'_upload_tmp_{int(time.time())}.stl')
+    f.save(tmp_path)
+
+    try:
+        mesh = o3d.io.read_triangle_mesh(tmp_path)
+        if len(mesh.triangles) == 0:
+            return jsonify({'status': 'error', 'message': 'STL has no triangles — check the file'})
+
+        if units == 'mm':
+            # Internal pipeline (mesh viewer, mesh/split) works in metres
+            mesh.scale(0.001, center=(0, 0, 0))
+
+        mesh.compute_vertex_normals()
+
+        out_path = os.path.join(GENERATED_MODELS_DIR, f'{safe_name}_uploaded.stl')
+        o3d.io.write_triangle_mesh(out_path, mesh)
+        tri_count = len(mesh.triangles)
+        print(f"[MESH] Uploaded STL -> {out_path}  ({tri_count} triangles, units={units})")
+
+        state['built_mesh_path'] = out_path
+        state['primitive_stl']   = out_path
+        CONFIG['clean_stl_path'] = out_path
+
+        return jsonify({
+            'status':       'ok',
+            'stl_path':     out_path,
+            'download_url': f'/api/mesh/download?path={out_path}',
+            'tri_count':    tri_count,
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)})
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+@app.route('/api/mesh/split', methods=['POST'])
+def api_mesh_split():
+    """
+    Split the already-built mesh STL into clean/avoid STLs by triangle index.
+    clean_tris / avoid_tris: lists of triangle indices in the full mesh.
+    Saves <name>_clean.stl and <name>_avoid.stl, sends them to MoveIt.
+    """
+    data       = request.json or {}
+    stl_path   = data.get('stl_path', state.get('built_mesh_path', ''))
+    clean_tris = data.get('clean_tris', [])
+    avoid_tris = data.get('avoid_tris', [])
+    filename   = data.get('filename', '').strip()
+    o3d        = get_open3d()
+
+    if not stl_path or not os.path.exists(stl_path):
+        return jsonify({'status': 'error', 'message': f'Built mesh not found: {stl_path}'})
+    if not clean_tris and not avoid_tris:
+        return jsonify({'status': 'error', 'message': 'No triangles selected'})
+
+    try:
+        mesh = o3d.io.read_triangle_mesh(stl_path)
+        tris = np.asarray(mesh.triangles)
+        verts = np.asarray(mesh.vertices)
+
+        safe_name = ("".join(c for c in os.path.splitext(filename)[0]
+                             if c.isalnum() or c in '-_ ').strip() or 'scan') if filename else 'scan'
+        os.makedirs(GENERATED_MODELS_DIR, exist_ok=True)
+
+        results = {}
+        exported_clean = None
+
+        for label, idx_list in [('clean', clean_tris), ('avoid', avoid_tris)]:
+            if not idx_list:
+                continue
+            idx_arr = np.array(idx_list, dtype=int)
+            idx_arr = idx_arr[idx_arr < len(tris)]  # bounds check
+            if not len(idx_arr):
+                continue
+
+            sub = o3d.geometry.TriangleMesh()
+            sub.vertices  = o3d.utility.Vector3dVector(verts)
+            sub.triangles = o3d.utility.Vector3iVector(tris[idx_arr])
+            sub.remove_unreferenced_vertices()
+            sub.compute_vertex_normals()
+            # Scale to mm for MoveIt/path_planning compatibility
+            sub.scale(1000, center=(0, 0, 0))
+
+            out = os.path.join(GENERATED_MODELS_DIR, f'{safe_name}_{label}.stl')
+            o3d.io.write_triangle_mesh(out, sub)
+            print(f'[MESH] Split {label}: {len(idx_arr)} tris → {out}')
+
+            results[label] = send_stl_to_moveit(out, f'{label}_zone')
+            if label == 'clean':
+                exported_clean = out
+
+        if exported_clean:
+            state['primitive_stl']   = exported_clean
+            state['built_mesh_path'] = exported_clean
+            CONFIG['clean_stl_path'] = exported_clean
+
+        return jsonify({'status': 'ok', 'results': results})
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)})
+
 
 @app.route('/api/moveit/send', methods=['POST'])
 def api_send_to_moveit():
     data    = request.json
-    ok      = send_stl_to_moveit(data.get('path'), data.get('name', 'scanned_object'),
-                                  x=data.get('x', 0.5), y=data.get('y', 0.0), z=data.get('z', 0.2))
+    ok      = send_stl_to_moveit(data.get('path'), data.get('name', 'scanned_object'))
     return jsonify({'status': 'ok' if ok else 'error'})
+
+# ── Robot / path-planning subprocess control ──────────────────
+
+_robot_proc      = None
+_robot_proc_lock = threading.Lock()
+
+# ── UR10 Startup sequence ─────────────────────────────────────
+
+_startup_running = False
+_startup_lock    = threading.Lock()
+
+def _run_startup_sequence():
+    """Run the UR10 startup steps in order, streaming log lines via SocketIO."""
+    global _startup_running
+    import subprocess as _sp
+
+    def _log(msg):
+        print(f'[STARTUP] {msg}')
+        socketio.emit('startup_log', {'line': msg})
+
+    _log(f'DISPLAY={os.environ.get("DISPLAY", "NOT SET")}')
+    _log(f'XAUTHORITY={os.environ.get("XAUTHORITY", "NOT SET")}')
+
+    def _run(cmd, shell=False, env=None):
+        """Run a command, stream its output, return exit code."""
+        try:
+            proc = _sp.Popen(
+                cmd, shell=shell,
+                stdout=_sp.PIPE, stderr=_sp.STDOUT,
+                env=env,
+            )
+            for raw in iter(proc.stdout.readline, b''):
+                _log(raw.decode('utf-8', errors='replace').rstrip())
+            proc.wait()
+            return proc.returncode
+        except Exception as e:
+            _log(f'ERROR: {e}')
+            return -1
+
+    ros_setup = '/opt/ros/jazzy/setup.bash'
+    if not os.path.exists(ros_setup):
+        for d in ('iron', 'humble', 'galactic'):
+            c = f'/opt/ros/{d}/setup.bash'
+            if os.path.exists(c):
+                ros_setup = c
+                break
+
+    try:
+        # ── Step 0: Kill any stale ROS2 processes ─────────────────
+        _log('=== Step 0: Clearing stale ROS2 processes ===')
+        for pattern in ['ur_robot_driver', 'ur_moveit', 'rviz2', 'ros2']:
+            _sp.run(['pkill', '-f', pattern], capture_output=True)
+        _log('Stale processes cleared. Waiting 2s…')
+        time.sleep(2)
+
+        # ── Step 1: Network ───────────────────────────────────
+        _log('=== Step 1: Configuring network interface ===')
+        iface = CONFIG.get('ur_network_iface', 'enp5s0')
+        host_ip = CONFIG.get('ur_host_ip', '192.168.0.100/24')
+        for cmd in [
+            ['sudo', 'ip', 'addr', 'flush', 'dev', iface],
+            ['sudo', 'ip', 'addr', 'add', host_ip, 'dev', iface],
+            ['sudo', 'ip', 'link', 'set', iface, 'up'],
+        ]:
+            rc = _run(cmd)
+            if rc != 0:
+                _log(f'WARNING: command returned {rc}: {" ".join(cmd)}')
+        _log('Network configured. Waiting 2s…')
+        time.sleep(2)
+
+        # ── Step 2: UR Driver ─────────────────────────────────
+        _log('=== Step 2: Launching UR Driver ===')
+        robot_ip = CONFIG.get('robot_ip', '192.168.0.43')
+        ur_type  = CONFIG.get('ur_type', 'ur10')
+        _sp.Popen(
+            ['bash', '-c',
+             f'source {ros_setup} && '
+             f'ros2 launch ur_robot_driver ur_control.launch.py '
+             f'ur_type:={ur_type} robot_ip:={robot_ip}'],
+            stdout=_sp.PIPE, stderr=_sp.STDOUT,
+        )
+        _log('UR Driver launched. Waiting 10s for initialisation…')
+        _log('(Press Play on the pendant now if you haven\'t already)')
+        time.sleep(10)
+
+        # ── Step 3: MoveIt ────────────────────────────────────
+        _log('=== Step 3: Launching MoveIt ===')
+        display_env = dict(os.environ)
+        display_env['DISPLAY'] = os.environ.get('DISPLAY', ':1')
+        display_env['XAUTHORITY'] = os.environ.get('XAUTHORITY',
+                                                   os.path.expanduser('~/.Xauthority'))
+        moveit_proc = _sp.Popen(
+            ['bash', '-c',
+             f'source {ros_setup} && '
+             f'ros2 launch ur_moveit_config ur_moveit.launch.py '
+             f'ur_type:={ur_type} launch_rviz:=false'],
+            stdout=_sp.PIPE, stderr=_sp.STDOUT,
+            env=display_env,
+        )
+        threading.Thread(
+            target=lambda: [_log(l.decode('utf-8', errors='replace').rstrip())
+                            for l in iter(moveit_proc.stdout.readline, b'')],
+            daemon=True
+        ).start()
+        _log('MoveIt launched. Waiting 5s…')
+        time.sleep(5)
+        _log('=== Step 3b: Launching RViz ===')
+        launch_rviz_for_execution()
+        _log('RViz launched.')
+
+        # ── Step 4: Check joint states ────────────────────────
+        _log('=== Step 4: Checking joint states ===')
+        _run(['bash', '-c',
+              f'source {ros_setup} && '
+              f'ros2 topic echo /joint_states --once'])
+
+        # ── Step 5: Load environment ──────────────────────────
+        _log('=== Step 5: Loading Environment ===')
+        env_script = os.path.expanduser(
+            CONFIG.get('environment_setup_script',
+                       '~/Documents/SMR/Scan/STLFiles/environment_setup.py'))
+        if os.path.isfile(env_script):
+            _run(['bash', '-c',
+                  f'source {ros_setup} && python3 {env_script}'],
+                 env=dict(os.environ))
+        else:
+            _log(f'WARNING: environment_setup.py not found at {env_script} — skipping')
+
+        _log('=== All done! System ready. ===')
+        socketio.emit('startup_done', {'code': 0})
+
+    except Exception as e:
+        _log(f'FATAL: {e}')
+        socketio.emit('startup_done', {'code': -1})
+    finally:
+        with _startup_lock:
+            _startup_running = False
+
+
+@app.route('/api/startup', methods=['POST'])
+def api_startup():
+    """Begin the UR10 startup sequence in a background thread."""
+    global _startup_running
+    with _startup_lock:
+        if _startup_running:
+            return jsonify({'status': 'error', 'message': 'Already running'})
+        _startup_running = True
+    threading.Thread(target=_run_startup_sequence, daemon=True).start()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/startup/status', methods=['GET'])
+def api_startup_status():
+    with _startup_lock:
+        running = _startup_running
+    return jsonify({'running': running})
+
+def _stream_robot_output(proc):
+    """Stream path_planning.py stdout → SocketIO.
+
+    Protocol lines emitted as structured events:
+      PREVIEW_FACE:<idx>:<label>:<type>:<n_stripes>
+      PREVIEW_FACE_DONE:<idx>
+      PREVIEW_ALL_DONE
+      PREVIEW_ABORTED
+    All lines also go to robot_log for the console.
+    """
+    try:
+        for raw in iter(proc.stdout.readline, b''):
+            line = raw.decode('utf-8', errors='replace').rstrip()
+            if line.startswith('PREVIEW_FACE:') and not line.startswith('PREVIEW_FACE_DONE'):
+                parts = line.split(':')
+                socketio.emit('preview_face', {
+                    'index': int(parts[1]), 'label': parts[2],
+                    'type': parts[3],       'stripes': int(parts[4]),
+                })
+            elif line.startswith('PREVIEW_FACE_DONE:'):
+                socketio.emit('preview_face_done', {'index': int(line.split(':')[1])})
+            elif line == 'PREVIEW_ALL_DONE':
+                socketio.emit('preview_all_done', {})
+            elif line == 'PREVIEW_ABORTED':
+                socketio.emit('preview_aborted', {})
+            elif line.startswith('COVERAGE_UPDATE:'):
+                # COVERAGE_UPDATE:<pct>:<stripe>:<covered_cm2>:<total_cm2>
+                parts = line.split(':')
+                socketio.emit('coverage_update', {
+                    'pct':        float(parts[1]),
+                    'stripe':     int(parts[2]),
+                    'covered_cm2': float(parts[3]),
+                    'total_cm2':  float(parts[4]),
+                })
+            socketio.emit('robot_log', {'line': line})
+        proc.wait()
+        code = proc.returncode
+        socketio.emit('robot_done', {
+            'code': code,
+            'message': '✔ Complete.' if code == 0 else f'⚠ Exited with code {code}.'
+        })
+    except Exception as e:
+        socketio.emit('robot_done', {'code': -1, 'message': f'Stream error: {e}'})
+    finally:
+        with _robot_proc_lock:
+            global _robot_proc
+            _robot_proc = None
+
+
+def _launch_path_planner(extra_args):
+    """Start path_planning.py subprocess. Returns (proc, error_str)."""
+    global _robot_proc
+    with _robot_proc_lock:
+        if _robot_proc is not None and _robot_proc.poll() is None:
+            return None, 'Already running'
+
+    clean_stl = os.path.expanduser(CONFIG['clean_stl_path'])
+    if not os.path.exists(clean_stl):
+        return None, f'Clean STL not found: {clean_stl} — export faces first'
+
+    default_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'path_planning.py')
+    script = os.path.expanduser(CONFIG.get('path_planning_script', '').strip() or default_script)
+
+    if os.path.isdir(script):
+        return None, (
+            f'path_planning_script points to a directory: {script}\n'
+            f'It must be the full path to the .py file, e.g.:\n'
+            f'  {os.path.join(script, "path_planning.py")}'
+        )
+    if not os.path.isfile(script):
+        return None, (
+            f'path_planning.py not found at: {script}\n'
+            f'Set the correct path in ⚙ Settings → Path Planning Script.'
+        )
+
+    cmd = [sys.executable, script, '--stl', clean_stl] + extra_args
+
+    # Use the primitive/hull STL for the visualizer mesh if one was exported —
+    # it's a much cleaner shape than the full surface reconstruction
+    viz_stl = state.get('primitive_stl')
+    if viz_stl and os.path.exists(viz_stl):
+        cmd += ['--viz-stl', viz_stl]
+        print(f"[ROBOT] Using primitive STL for visualizer: {viz_stl}")
+    else:
+        print(f"[ROBOT] No primitive STL found — visualizer will use full surface mesh")
+
+    print(f"[ROBOT] Launching: {' '.join(cmd)}")
+
+    import subprocess
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=os.path.dirname(script),
+        )
+        with _robot_proc_lock:
+            _robot_proc = proc
+        threading.Thread(target=_stream_robot_output, args=(proc,), daemon=True).start()
+        return proc, None
+    except Exception as e:
+        return None, str(e)
+
+
+@app.route('/api/robot/preview', methods=['POST'])
+def api_robot_preview():
+    """Launch path_planning.py --preview. UI drives it via /api/robot/confirm."""
+    proc, err = _launch_path_planner(['--preview'])
+    if err:
+        return jsonify({'status': 'error', 'message': err})
+    return jsonify({'status': 'ok', 'pid': proc.pid})
+
+
+@app.route('/api/robot/confirm', methods=['POST'])
+def api_robot_confirm():
+    """Send NEXT / EXECUTE / CANCEL to the running preview process stdin."""
+    global _robot_proc
+    with _robot_proc_lock:
+        proc = _robot_proc
+    if proc is None or proc.poll() is not None:
+        return jsonify({'status': 'error', 'message': 'No preview running'})
+    signal = request.json.get('signal', 'NEXT')
+    try:
+        proc.stdin.write((signal + '\n').encode())
+        proc.stdin.flush()
+        return jsonify({'status': 'ok', 'signal': signal})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+
+def generate_rviz_config(config_path: str):
+    """
+    Write a minimal RViz2 config that shows:
+      - Grid (ground reference)
+      - RobotModel (live UR10 from /robot_description)
+      - TF (so arm links move)
+      - MarkerArray on /cleaning_coverage  (cone + red patches + HUD)
+      - MarkerArray on /waypoint_markers   (planned path lines)
+      - CollisionObject mesh via PlanningScene display
+    """
+    cfg = """\
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.5
+      Color: 160; 160; 164
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 10
+      Reference Frame: <Fixed Frame>
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: false
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Visual Enabled: true
+      Collision Enabled: false
+      Update Interval: 0
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Name: MotionPlanning
+      Enabled: true
+      Move Group Namespace: ""
+      Robot Description: robot_description
+      Planning Scene Topic:
+        Value: /monitored_planning_scene
+      Scene Geometry:
+        Scene Alpha: 0.9
+        Scene Color: 50; 230; 50
+      Scene Robot:
+        Show Robot Visual: true
+        Show Robot Collision: true
+        Robot Alpha: 0.5
+      Planned Path:
+        Show Robot Visual: true
+        Show Robot Collision: false
+        State Display Time: 0.05 s
+        Loop Animation: true
+      Alpha: 1
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Arrows: false
+      Show Axes: false
+      Show Names: false
+      Marker Scale: 0.3
+      Update Interval: 0
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+    - Class: rviz_default_plugins/MarkerArray
+      Name: CleaningCoverage
+      Enabled: true
+      Topic:
+        Depth: 50
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /cleaning_coverage
+      Namespaces: {}
+    - Class: rviz_default_plugins/MarkerArray
+      Name: WaypointPath
+      Enabled: true
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /waypoint_markers
+      Namespaces: {}
+  Enabled: true
+  Global Options:
+    Background Color: 13; 17; 23
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 2.5
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.65
+        Y: 0
+        Z: 0.4
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.45
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 3.8
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: true
+  Views:
+    collapsed: false
+  Width: 1400
+  X: 50
+  Y: 50
+"""
+    with open(config_path, 'w') as f:
+        f.write(cfg)
+    print(f"[RViz] Config written to {config_path}")
+
+
+_rviz_proc = None
+
+def launch_rviz_for_execution():
+    """Launch a fresh RViz2 window configured for the cleaning run."""
+    global _rviz_proc
+
+    # Kill any previous RViz we launched
+    if _rviz_proc is not None and _rviz_proc.poll() is None:
+        _rviz_proc.terminate()
+        _rviz_proc = None
+
+    config_path = os.path.expanduser('~/scanner_cleaning_rviz.rviz')
+    generate_rviz_config(config_path)
+
+    import subprocess
+    try:
+        # Detect ROS2 distro from environment, fall back to humble
+        ros_distro = os.environ.get('ROS_DISTRO', 'humble')
+        ros_setup  = f'/opt/ros/{ros_distro}/setup.bash'
+        if not os.path.exists(ros_setup):
+            # Try to find any installed distro
+            for distro in ('jazzy', 'iron', 'humble', 'galactic'):
+                candidate = f'/opt/ros/{distro}/setup.bash'
+                if os.path.exists(candidate):
+                    ros_setup = candidate
+                    break
+
+        cmd = ['bash', '-c',
+               f'source {ros_setup} && rviz2 -d {config_path}']
+
+        rviz_env = dict(os.environ)
+        rviz_env.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
+        rviz_env.pop('QT_PLUGIN_PATH', None)
+
+        _rviz_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=rviz_env,
+        )
+        threading.Thread(
+            target=lambda: [print(f'[RViz] {l.decode("utf-8", errors="replace").rstrip()}')
+                            for l in iter(_rviz_proc.stdout.readline, b'')],
+            daemon=True
+        ).start()
+        print(f"[RViz] Launched (pid {_rviz_proc.pid}) with config {config_path}")
+        return True
+    except Exception as e:
+        print(f"[RViz] Failed to launch: {e}")
+        return False
+
+
+@app.route('/api/robot/execute', methods=['POST'])
+def api_robot_execute():
+    """Launch a fresh RViz window then start path_planning.py in execute mode."""
+    launch_rviz_for_execution()
+
+    def _delayed_launch():
+        # Give RViz time to start subscribing before path_planning's clearer fires
+        time.sleep(1.5)
+        proc, err = _launch_path_planner([])
+        if err:
+            socketio.emit('robot_log', {'line': f'✗ {err}'})
+            socketio.emit('robot_done', {'code': -1, 'message': err})
+
+    threading.Thread(target=_delayed_launch, daemon=True).start()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/robot/stop', methods=['POST'])
+def api_robot_stop():
+    global _robot_proc, _rviz_proc
+    with _robot_proc_lock:
+        proc = _robot_proc
+    if proc is None or proc.poll() is not None:
+        return jsonify({'status': 'ok', 'message': 'Not running'})
+    try:
+        proc.terminate()
+        socketio.emit('robot_log', {'line': '⚠ Stopped by user.'})
+        socketio.emit('robot_done', {'code': -1, 'message': 'Stopped by user.'})
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
@@ -1129,10 +2023,12 @@ def on_request_pointcloud():
 
 if __name__ == '__main__':
     load_config()
+    os.makedirs(GENERATED_MODELS_DIR, exist_ok=True)
     print("=" * 50)
     print("  3D Scanner Web App")
     print("  Open http://localhost:5000 in your browser")
     print(f"  Arduino: {'ENABLED' if CONFIG['arduino_enabled'] else 'DISABLED'}")
+    print(f"  Models dir: {GENERATED_MODELS_DIR}")
     print(f"  Camera tilt: {CONFIG['camera_tilt_deg']}°")
     print(f"  Camera distance: {CONFIG['camera_distance_m']}m")
     print(f"  Camera height: {CONFIG['camera_height_m']}m")

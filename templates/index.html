@@ -195,6 +195,17 @@
     overflow: hidden;
   }
   #select-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+  #inset-canvas {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    width: 200px;
+    height: 200px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #0a0f1a;
+    pointer-events: none;
+  }
   .brush-controls { display: flex; flex-direction: column; gap: 10px; }
   .brush-btn {
     padding: 10px;
@@ -229,7 +240,10 @@
   /* ════════════════════════════════
      TAB 3 — ROBOT
   ════════════════════════════════ */
-  #tab-robot { padding: 10px; gap: 10px; }
+  .stage-pill { background:#21262d;border:1px solid var(--border);border-radius:12px;padding:2px 10px;color:var(--muted);transition:background .3s,color .3s,border-color .3s; }
+  .stage-active { background:var(--yellow);color:#000;border-color:var(--yellow);font-weight:bold; }
+  .stage-done   { background:#1a3a1a;color:var(--green);border-color:var(--green); }
+  #tab-robot { padding: 20px; overflow-y: auto; }
   .robot-grid {
     display: grid;
     grid-template-columns: 1fr 200px;
@@ -316,9 +330,10 @@
 <!-- ── Tabs ── -->
 <div class="tabs">
   <div class="tab active" onclick="switchTab('scan')">① SCAN</div>
-  <div class="tab" onclick="switchTab('select')">② SELECT FACES</div>
-  <div class="tab" onclick="switchTab('robot')">③ ROBOT</div>
-  <div class="tab" onclick="switchTab('preview')">④ STL PREVIEW</div>
+  <div class="tab" onclick="switchTab('mesh')">② MESH</div>
+  <div class="tab" onclick="switchTab('select')">③ SELECT FACES</div>
+  <div class="tab" onclick="switchTab('robot')">④ ROBOT</div>
+  <div class="tab" onclick="switchTab('preview')">⑤ STL PREVIEW</div>
   <div class="tab" onclick="switchTab('settings')">⚙ SETTINGS</div>
 </div>
 
@@ -352,6 +367,11 @@
       <button class="btn btn-secondary" id="btn-stop-scan" onclick="stopScan()" disabled>
         ■ STOP SCAN
       </button>
+
+      <label style="display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;cursor:pointer">
+        <input type="checkbox" id="chk-live-pcd" checked onchange="setLivePcdUpdate(this.checked)">
+        Live pointcloud update
+      </label>
 
       <hr style="border-color:var(--border)">
       <div class="panel-title">Info</div>
@@ -396,17 +416,105 @@
 </div>
 
 <!-- ════════════════════════════════
-     TAB 2 — SELECT FACES
+     TAB 2 — MESH
+════════════════════════════════ -->
+<div id="tab-mesh" class="tab-content">
+  <div style="display:grid;grid-template-columns:1fr 220px;gap:10px;flex:1;min-height:0;padding:10px">
+
+    <div style="background:#000813;border:1px solid var(--border);border-radius:4px;position:relative;overflow:hidden">
+      <canvas id="mesh-canvas" style="display:block;width:100%;height:100%"></canvas>
+      <div style="position:absolute;bottom:8px;left:8px;color:var(--muted);font-size:10px">
+        Drag to rotate · Scroll to zoom
+      </div>
+    </div>
+
+    <div class="panel" style="display:flex;flex-direction:column;gap:8px;overflow-y:auto;padding:12px">
+      <div class="panel-title">② MESH</div>
+
+      <div class="moveit-status" id="mesh-status" style="margin:0">
+        Complete a scan, then build a mesh.
+      </div>
+
+      <label style="color:var(--muted);font-size:10px">MESH TYPE</label>
+      <select id="mesh-primitive-type"
+              style="width:100%;background:#21262d;color:var(--text);border:1px solid var(--border);
+                     padding:5px 4px;font-family:inherit;font-size:11px;border-radius:4px"
+              onchange="document.getElementById('mesh-hull-wrap').style.display=this.value==='hull'?'flex':'none';
+                        document.getElementById('mesh-lowpoly-wrap').style.display=this.value==='lowpoly'?'flex':'none'">
+        <option value="hull" selected>Convex Hull</option>
+        <option value="lowpoly">Low-poly Surface</option>
+        <option value="box">Box</option>
+        <option value="cylinder">Cylinder</option>
+        <option value="sphere">Sphere</option>
+      </select>
+
+      <div id="mesh-hull-wrap" style="display:flex;flex-direction:column;gap:2px">
+        <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:10px">
+          <span>Coarse</span><span>Detail: <span id="mesh-hull-val">50</span></span><span>Fine</span>
+        </div>
+        <input type="range" id="mesh-hull-detail" min="0" max="100" value="50" style="width:100%;margin:0"
+               oninput="document.getElementById('mesh-hull-val').textContent=this.value">
+      </div>
+
+      <div id="mesh-lowpoly-wrap" style="display:none;flex-direction:column;gap:2px">
+        <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:10px">
+          <span>Fewer</span><span>Tris: <span id="mesh-lowpoly-val">200</span></span><span>More</span>
+        </div>
+        <input type="range" id="mesh-lowpoly-tris" min="50" max="2000" value="200" step="50"
+               style="width:100%;margin:0"
+               oninput="document.getElementById('mesh-lowpoly-val').textContent=this.value">
+      </div>
+
+      <button class="btn" id="btn-build-mesh" onclick="buildMesh()"
+              style="background:var(--accent);color:#fff">
+        ⬡ BUILD MESH
+      </button>
+
+      <button class="btn" id="btn-mesh-proceed" onclick="switchTab('select')" disabled
+              style="background:#1a3a2a;color:var(--text);border:1px solid var(--green)">
+        ▶ SELECT FACES →
+      </button>
+
+      <hr style="border-color:var(--border);margin:4px 0">
+      <input type="file" id="mesh-upload-file" accept=".stl" style="display:none"
+             onchange="document.getElementById('mesh-upload-name').textContent=this.files[0]?this.files[0].name:'No file chosen'">
+      <button class="btn btn-secondary" onclick="document.getElementById('mesh-upload-file').click()" style="font-size:11px">
+        📁 CHOOSE STL…
+      </button>
+      <div id="mesh-upload-name" style="color:var(--muted);font-size:10px;text-align:center">No file chosen</div>
+      <select id="mesh-upload-units" style="width:100%;background:#21262d;color:var(--text);border:1px solid var(--border);
+              padding:4px;font-family:inherit;font-size:10px;border-radius:4px">
+        <option value="mm" selected>STL units: millimetres</option>
+        <option value="m">STL units: metres</option>
+      </select>
+      <button class="btn" id="btn-upload-mesh" onclick="uploadMeshSTL()" style="background:#5a3d99;color:#fff">
+        ⬆ LOAD STL
+      </button>
+
+      <div style="color:var(--muted);font-size:10px;margin-top:4px" id="mesh-info"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 3 — SELECT FACES
 ════════════════════════════════ -->
 <div id="tab-select" class="tab-content">
   <div class="select-grid">
 
     <div id="select-canvas-wrap">
       <canvas id="select-canvas"></canvas>
+      <canvas id="inset-canvas"></canvas>
     </div>
 
     <div class="panel brush-controls" style="overflow-y:auto">
-      <div class="panel-title">Brush Tool</div>
+      <div class="panel-title">③ SELECT FACES</div>
+
+      <div class="moveit-status" id="select-status" style="margin:0;font-size:10px">
+        Build a mesh first (② MESH), then paint faces here.
+      </div>
+
       <button class="brush-btn brush-clean active" id="btn-brush-clean"
               onclick="setBrush('clean')" style="padding:5px 8px">
         🔵 CLEAN ZONE
@@ -420,54 +528,30 @@
         ⬜ ERASE
       </button>
       <div style="display:flex;align-items:center;gap:6px">
-        <span style="color:var(--muted);font-size:10px;white-space:nowrap">Size: <span id="brush-size-val">20</span>px</span>
-        <input type="range" id="brush-size" min="5" max="80" value="20" style="flex:1"
+        <span style="color:var(--muted);font-size:10px;white-space:nowrap">Brush: <span id="brush-size-val">20</span>px</span>
+        <input type="range" id="brush-size" min="5" max="120" value="20" style="flex:1"
                oninput="brushSize=+this.value;document.getElementById('brush-size-val').textContent=this.value">
       </div>
-      <div style="font-size:10px;color:var(--yellow);text-align:center">SHIFT + drag to paint</div>
+      <div style="font-size:10px;color:var(--yellow);text-align:center">SHIFT + drag to paint · drag to rotate</div>
+
       <hr style="border-color:var(--border);margin:2px 0">
+
       <input type="text" id="export-filename" placeholder="Filename (optional)"
              style="background:#21262d;border:1px solid var(--border);border-radius:4px;
                     color:var(--text);padding:5px 7px;font-family:'Courier New',monospace;font-size:11px;width:100%">
-      <div style="display:flex;gap:4px">
-        <button class="btn btn-success" onclick="exportSTLs()" id="btn-export" style="flex:2;padding:6px;font-size:11px">
-          ⫡ EXPORT STLs
-        </button>
+
+      <div style="display:flex;gap:6px;align-items:center">
         <button class="btn btn-secondary" onclick="clearPaint()" title="Clear paint"
                 style="flex:0 0 32px;padding:6px">🗑</button>
+        <span style="color:var(--muted);font-size:10px">
+          Clean: <span id="sel-clean-count" style="color:var(--text)">0</span> tris ·
+          Avoid: <span id="sel-avoid-count" style="color:var(--text)">0</span> tris
+        </span>
       </div>
-      <div style="display:flex;gap:4px">
-        <select id="primitive-type" style="flex:1;background:#21262d;color:var(--text);border:1px solid var(--border);padding:5px 4px;font-family:inherit;font-size:11px;border-radius:4px"
-                onchange="document.getElementById('hull-detail-wrap').style.display=this.value==='hull'?'flex':'none';
-                          document.getElementById('lowpoly-wrap').style.display=this.value==='lowpoly'?'flex':'none'">
-          <option value="box">Box</option>
-          <option value="cylinder">Cylinder</option>
-          <option value="sphere">Sphere</option>
-          <option value="hull">Convex Hull</option>
-          <option value="lowpoly">Low-poly Surface</option>
-        </select>
-        <div id="hull-detail-wrap" style="display:none;flex-direction:column;gap:2px;margin-top:2px">
-          <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:10px">
-            <span>Coarse</span><span>Detail: <span id="hull-detail-val">50</span></span><span>Fine</span>
-          </div>
-          <input type="range" id="hull-detail" min="0" max="100" value="50" style="width:100%;margin:0"
-                 oninput="document.getElementById('hull-detail-val').textContent=this.value">
-        </div>
-        <div id="lowpoly-wrap" style="display:none;flex-direction:column;gap:2px;margin-top:2px">
-          <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:10px">
-            <span>Fewer</span><span>Tris: <span id="lowpoly-val">200</span></span><span>More</span>
-          </div>
-          <input type="range" id="lowpoly-tris" min="50" max="2000" value="200" step="50" style="width:100%;margin:0"
-                 oninput="document.getElementById('lowpoly-val').textContent=this.value">
-        </div>
-        <button class="btn" onclick="exportPrimitive()" id="btn-primitive"
-                style="flex:1;background:#1a3a2a;color:var(--text);padding:6px;font-size:11px">
-          □ FIT
-        </button>
-      </div>
-      <button class="btn" onclick="exportBothAndPreview()" id="btn-both"
-              style="background:#1a2a3a;color:var(--text);border:1px solid var(--blue);padding:6px;font-size:11px">
-        ◈ BOTH + PREVIEW
+
+      <button class="btn" id="btn-proceed-robot" onclick="proceedToRobot()" disabled
+              style="background:#1a3a2a;color:var(--text);border:1px solid var(--green);padding:8px;font-size:11px">
+        ▶ PROCEED TO ROBOT CONTROL
       </button>
       <div id="export-status" style="color:var(--muted);font-size:11px;text-align:center;white-space:pre-line"></div>
     </div>
@@ -479,58 +563,73 @@
      TAB 3 — ROBOT
 ════════════════════════════════ -->
 <div id="tab-robot" class="tab-content">
-  <div class="robot-grid">
+  <div style="max-width:680px;display:flex;flex-direction:column;gap:14px">
+    <div class="panel-title" style="font-size:13px;letter-spacing:2px">③ ROBOT CONTROL</div>
 
-    <div id="robot-canvas-wrap">
-      <canvas id="robot-canvas"></canvas>
-      <div style="position:absolute;bottom:8px;left:8px;color:var(--muted);font-size:10px">
-        Drag to rotate · Scroll to zoom
+    <!-- ── Startup panel ── -->
+    <div id="startup-panel" class="panel" style="gap:8px;padding:12px;border-color:var(--blue)">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span style="color:var(--blue);font-size:11px;letter-spacing:1px">SYSTEM STARTUP</span>
+        <span id="startup-status-pill" style="font-size:10px;padding:2px 8px;border-radius:10px;background:#21262d;color:var(--muted)">IDLE</span>
+      </div>
+      <div style="color:var(--muted);font-size:11px">Configures network, launches UR Driver, MoveIt + RViz, checks joint states, and loads the environment.</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="btn-startup" onclick="startSystem()" style="flex:1;background:var(--blue);color:#000;font-weight:bold">⚡ START SYSTEM</button>
+        <button class="btn btn-secondary" id="btn-startup-toggle-log" onclick="toggleStartupLog()" style="flex:0 0 auto;width:auto;font-size:10px;padding:8px 12px">Show log</button>
+      </div>
+      <div id="startup-log-wrap" style="display:none">
+        <div id="startup-log" style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:8px;font-size:10px;font-family:'Courier New',monospace;color:#8b949e;height:160px;overflow-y:auto;white-space:pre-wrap"></div>
       </div>
     </div>
-
-    <div class="panel robot-controls">
-      <div class="panel-title">MoveIt Control</div>
-
-      <div class="moveit-status" id="moveit-status">
-        Waiting for scan and face selection...
+    <div style="display:flex;gap:8px;align-items:center;font-size:10px;letter-spacing:1px">
+      <span id="stage-pill-preview" class="stage-pill stage-active">1 · PREVIEW</span>
+      <span style="color:var(--muted)">▶</span>
+      <span id="stage-pill-confirm" class="stage-pill">2 · CONFIRM</span>
+      <span style="color:var(--muted)">▶</span>
+      <span id="stage-pill-execute" class="stage-pill">3 · EXECUTE</span>
+    </div>
+    <div class="moveit-status" id="moveit-status" style="margin:0">Export faces first (② Select Faces → Proceed), then start preview.</div>
+    <div id="robot-panel-preview" class="panel" style="gap:8px;padding:12px">
+      <div style="color:var(--muted);font-size:11px">Launches path planning. The robot model in RViz animates each face's planned trajectory — no physical movement.</div>
+      <button class="btn" id="btn-start-preview" onclick="startPreview()" style="background:var(--yellow);color:#000">▶ START PREVIEW IN RViz</button>
+    </div>
+    <div id="robot-panel-confirm" class="panel" style="display:none;gap:10px;padding:12px">
+      <div id="face-confirm-info" style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:10px;font-size:12px;color:var(--text)">Waiting for first face…</div>
+      <div id="face-progress-dots" style="display:flex;gap:4px;flex-wrap:wrap"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="btn-next-face" onclick="sendSignal('NEXT')" style="flex:1;background:var(--accent)" disabled>▶ Next Face</button>
+        <button class="btn btn-secondary" onclick="sendSignal('CANCEL')" style="flex:0 0 auto">✕ Cancel</button>
       </div>
-
-      <button class="btn btn-secondary" onclick="sendToMoveIt('clean')">
-        🔵 Send Clean Zone
-      </button>
-      <button class="btn btn-secondary" onclick="sendToMoveIt('avoid')">
-        🔴 Send Avoid Zone
-      </button>
-
-      <hr style="border-color:var(--border)">
-      <div class="panel-title">Scene Objects</div>
-      <div id="scene-objects" style="color:var(--muted);font-size:11px">No objects in scene</div>
-      <button class="btn btn-secondary" onclick="clearMoveItScene()">🗑 Clear Scene</button>
-
-      <hr style="border-color:var(--border)">
-      <div class="panel-title">Object Position</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px">
-        <div>
-          <label style="color:var(--muted);font-size:10px">X (m)</label>
-          <input type="number" id="obj-x" value="0.5" step="0.05"
-                 style="background:#21262d;border:1px solid var(--border);border-radius:4px;
-                        color:var(--text);padding:4px;width:100%;font-size:12px">
-        </div>
-        <div>
-          <label style="color:var(--muted);font-size:10px">Y (m)</label>
-          <input type="number" id="obj-y" value="0.0" step="0.05"
-                 style="background:#21262d;border:1px solid var(--border);border-radius:4px;
-                        color:var(--text);padding:4px;width:100%;font-size:12px">
-        </div>
-        <div>
-          <label style="color:var(--muted);font-size:10px">Z (m)</label>
-          <input type="number" id="obj-z" value="0.2" step="0.05"
-                 style="background:#21262d;border:1px solid var(--border);border-radius:4px;
-                        color:var(--text);padding:4px;width:100%;font-size:12px">
+      <div id="robot-final-confirm" style="display:none;border-top:1px solid var(--border);padding-top:10px">
+        <div style="color:var(--green);font-size:12px;margin-bottom:8px">✔ All faces previewed in RViz. Ready to execute on the real robot.</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="sendSignal('EXECUTE')" style="flex:1;background:#22aa55;color:#fff;font-size:13px">🤖 EXECUTE ON ROBOT</button>
+          <button class="btn btn-secondary" onclick="sendSignal('CANCEL')" style="flex:0 0 auto">✕ Cancel</button>
         </div>
       </div>
     </div>
-
+    <div id="robot-panel-execute" class="panel" style="display:none;gap:10px;padding:12px">
+      <div style="color:var(--muted);font-size:11px">A fresh RViz window is opening. Red patches appear on the object as each stripe completes.</div>
+      <div style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:10px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+          <span style="color:var(--muted);font-size:10px;letter-spacing:1px">COVERAGE</span>
+          <span id="coverage-pct" style="color:var(--green);font-size:20px;font-weight:bold">0.0%</span>
+        </div>
+        <div style="background:#21262d;border-radius:3px;height:8px;overflow:hidden">
+          <div id="coverage-bar" style="height:100%;width:0%;background:var(--green);transition:width .5s ease;border-radius:3px"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px;color:var(--muted)">
+          <span>Stripes: <span id="coverage-stripes" style="color:var(--text)">0</span></span>
+          <span id="coverage-area" style="color:var(--text)">0 / 0 cm²</span>
+        </div>
+      </div>
+      <button class="btn btn-secondary" onclick="stopRobot()" style="border-color:var(--accent);color:var(--accent)">⏹ STOP ROBOT</button>
+    </div>
+    <div class="panel" style="padding:10px;gap:6px">
+      <div style="color:var(--muted);font-size:10px;letter-spacing:1px">OUTPUT LOG</div>
+      <div id="robot-log" style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:8px;font-size:10px;font-family:'Courier New',monospace;color:#8b949e;height:220px;overflow-y:auto;white-space:pre-wrap"></div>
+      <button class="btn btn-secondary" onclick="document.getElementById('robot-log').innerHTML=''" style="font-size:10px;padding:3px 10px;align-self:flex-start">Clear log</button>
+    </div>
   </div>
 </div>
 
@@ -612,6 +711,11 @@
         <div class="setting-row">
           <label>AVOID STL OUTPUT PATH</label>
           <input type="text" id="s-avoid-path" value="~/scan_avoid.stl">
+        </div>
+        <div class="setting-row">
+          <label>PATH PLANNING SCRIPT</label>
+          <input type="text" id="s-path-planning-script" value="" placeholder="~/Documents/SMR/Scan/STLFiles/path_planning.py">
+          <div class="setting-hint">Full path to path_planning.py</div>
         </div>
         <div class="setting-row">
           <label>AUTO SEND TO MOVEIT</label>
@@ -811,11 +915,12 @@ function updateArduinoUI() {
 // ── Tab switching ──────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const names = ['scan','select','robot','preview','settings'];
+    const names = ['scan','mesh','select','robot','preview','settings'];
     t.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'mesh')   resizeMeshCanvas();
   if (name === 'select') resizeSelectCanvas();
   if (name === 'robot')  resizeRobotCanvas();
   if (name === 'preview') resizePreviewCanvas();
@@ -832,6 +937,14 @@ function setScanStatus(msg) {
 }
 
 // ── Scan controls ──────────────────────────────────────────────
+function setLivePcdUpdate(enabled) {
+  fetch('/api/scan/live_update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled})
+  });
+}
+
 async function startScan() {
   photoCount = 0;
   const res  = await fetch('/api/scan/start', { method: 'POST' });
@@ -881,7 +994,7 @@ async function stopScan() {
 // ── Pointcloud viewer (Tab 1) ──────────────────────────────────
 let pcdScene, pcdCamera, pcdRenderer, pcdPoints, pcdBbox, pcdGroup;
 let pcdDragging = false, pcdLast = {x:0,y:0};
-let pcdRotX = 0, pcdRotY = 0, pcdZoom = 3;
+let pcdRotX = -1.0, pcdRotY = 0, pcdRotZ = 0, pcdZoom = 3;
 
 function createBboxHelper(scene) {
   // Bounding box: matches app.py exactly
@@ -955,8 +1068,7 @@ function initPointcloudViewer() {
   canvas.addEventListener('mouseup',   () => pcdDragging=false);
   canvas.addEventListener('mousemove', e => {
     if (!pcdDragging) return;
-    pcdRotY += (e.clientX - pcdLast.x) * 0.01;
-    pcdRotX += (e.clientY - pcdLast.y) * 0.01;
+    pcdRotZ += (e.clientX - pcdLast.x) * 0.01;
     pcdLast = {x:e.clientX,y:e.clientY};
   });
   canvas.addEventListener('wheel', e => {
@@ -967,7 +1079,7 @@ function initPointcloudViewer() {
   function animate() {
     requestAnimationFrame(animate);
     pcdGroup.rotation.x = pcdRotX;
-    pcdGroup.rotation.y = pcdRotY;
+    pcdGroup.rotation.z = pcdRotZ;
     pcdCamera.position.z = pcdZoom;
     pcdRenderer.render(pcdScene, pcdCamera);
   }
@@ -993,110 +1105,562 @@ function updatePointcloudViewer(data) {
   pcdGroup.add(pcdPoints);
 }
 
-// ── Select viewer (Tab 2) ──────────────────────────────────────
-let selScene, selCamera, selRenderer, selPoints;
-let selDragging = false, selLast = {x:0,y:0};
-let selRotX = 0, selRotY = 0, selZoom = 3;
-let selPainting  = false;
+// ── Mesh tab (② MESH) ─────────────────────────────────────────
+let meshScene, meshCamera, meshRenderer;
+let meshDragging=false, meshLast={x:0,y:0};
+let meshRotX=-1.0, meshRotY=0.5, meshRotZ=0.5, meshZoom=1.5;
+let meshObject = null;          // the built THREE.Mesh shown in mesh tab
+let builtMeshData = null;       // { vertices:Float32Array, indices:Uint32Array, triCount }
+
+function initMeshViewer() {
+  const canvas = document.getElementById('mesh-canvas');
+  const wrap   = canvas.parentElement;
+  const W = wrap.clientWidth || 800, H = wrap.clientHeight || 600;
+  meshScene    = new THREE.Scene();
+  meshCamera   = new THREE.PerspectiveCamera(60, W/H, 0.001, 100);
+  meshCamera.position.set(0, 0, meshZoom);
+  meshRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  meshRenderer.setSize(W, H);
+  meshRenderer.setClearColor(0x000813);
+  meshScene.add(new THREE.AmbientLight(0x445566, 2));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.2);
+  dl.position.set(1,2,3); meshScene.add(dl);
+  const grid = new THREE.GridHelper(2, 20, 0x222233, 0x111122);
+  meshScene.add(grid);
+  canvas.addEventListener('mousedown', e => { meshDragging=true; meshLast={x:e.clientX,y:e.clientY}; });
+  canvas.addEventListener('mouseup',   () => meshDragging=false);
+  canvas.addEventListener('mousemove', e => {
+    if (!meshDragging) return;
+    meshRotZ += (e.clientX-meshLast.x)*0.01;
+    meshLast = {x:e.clientX,y:e.clientY};
+  });
+  canvas.addEventListener('wheel', e => {
+    meshZoom += e.deltaY*0.002; meshZoom=Math.max(0.3,Math.min(5,meshZoom));
+  });
+  (function animate(){
+    requestAnimationFrame(animate);
+    if (meshObject) { meshObject.rotation.x=meshRotX; meshObject.rotation.z=meshRotZ; }
+    meshCamera.position.z = meshZoom;
+    meshRenderer.render(meshScene, meshCamera);
+  })();
+}
+
+function resizeMeshCanvas() {
+  if (!meshRenderer) return;
+  const wrap = document.getElementById('mesh-canvas').parentElement;
+  meshRenderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  meshCamera.aspect = wrap.clientWidth / wrap.clientHeight;
+  meshCamera.updateProjectionMatrix();
+}
+
+async function buildMesh() {
+  const btn = document.getElementById('btn-build-mesh');
+  const statusEl = document.getElementById('mesh-status');
+  const primitive   = document.getElementById('mesh-primitive-type').value;
+  const hullDetail  = +(document.getElementById('mesh-hull-detail')?.value ?? 50);
+  const lowpolyTris = +(document.getElementById('mesh-lowpoly-tris')?.value ?? 200);
+  btn.disabled = true;
+  btn.textContent = '⏳ Building…';
+  statusEl.textContent = `Fitting ${primitive} to point cloud…`;
+
+  try {
+    const res  = await fetch('/api/mesh/build', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ primitive, hull_detail: hullDetail, lowpoly_tris: lowpolyTris,
+                             filename: document.getElementById('export-filename')?.value?.trim() || '' })
+    });
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      statusEl.textContent = '✗ ' + (data.message || 'Build failed');
+      btn.disabled=false; btn.textContent='⬡ BUILD MESH'; return;
+    }
+
+    await _displayBuiltMesh(data, primitive);
+
+  } catch(e) {
+    statusEl.textContent = '✗ Error: ' + e.message;
+  }
+  btn.disabled=false; btn.textContent='⬡ BUILD MESH';
+}
+
+// Shared by buildMesh() and uploadMeshSTL() — downloads the resulting STL,
+// renders it in the mesh viewer, stashes it for the select tab, and loads
+// it into the SELECT FACES viewer ready for painting.
+async function _displayBuiltMesh(data, label) {
+  const statusEl = document.getElementById('mesh-status');
+
+  // Download and display the STL in the mesh viewer
+  const stlRes = await fetch(data.download_url);
+  const buf    = await stlRes.arrayBuffer();
+  const geo    = parseSTLBinary(buf);
+  geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  const ctr = new THREE.Vector3();
+  geo.boundingBox.getCenter(ctr);
+  geo.translate(-ctr.x, -ctr.y, -ctr.z);
+
+  if (meshObject) { meshScene.remove(meshObject); meshObject = null; }
+  meshObject = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    color: 0x4488cc, shininess: 60, transparent: true, opacity: 0.85, side: THREE.DoubleSide
+  }));
+  meshScene.add(meshObject);
+
+  // Fit camera
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  meshZoom = Math.max(sz.x, sz.y, sz.z) * 1.8;
+
+  // Store mesh data so the select tab can load it
+  builtMeshData = {
+    stlPath: data.stl_path,
+    downloadUrl: data.download_url,
+    triCount: data.tri_count,
+  };
+
+  const tc = data.tri_count;
+  document.getElementById('mesh-info').textContent =
+    `${label} · ${tc} triangles · ${(sz.x*1000).toFixed(0)}×${(sz.y*1000).toFixed(0)}×${(sz.z*1000).toFixed(0)} mm`;
+  statusEl.textContent = `✔ Mesh ready — proceed to select faces`;
+  document.getElementById('btn-mesh-proceed').disabled = false;
+
+  // Also load into select tab viewer ready for painting
+  loadMeshIntoSelectViewer(buf);
+}
+
+async function uploadMeshSTL() {
+  const fileInput = document.getElementById('mesh-upload-file');
+  const btn       = document.getElementById('btn-upload-mesh');
+  const statusEl  = document.getElementById('mesh-status');
+  const file = fileInput.files[0];
+  if (!file) { statusEl.textContent = '✗ Choose an STL file first'; return; }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Loading…';
+  statusEl.textContent = `Loading ${file.name}…`;
+
+  try {
+    const form = new FormData();
+    form.append('stl_file', file);
+    form.append('units', document.getElementById('mesh-upload-units').value);
+    form.append('filename', document.getElementById('export-filename')?.value?.trim() || '');
+
+    const res  = await fetch('/api/mesh/upload', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      statusEl.textContent = '✗ ' + (data.message || 'Upload failed');
+      btn.disabled = false; btn.textContent = '⬆ LOAD STL'; return;
+    }
+    await _displayBuiltMesh(data, file.name);
+  } catch (e) {
+    statusEl.textContent = '✗ Error: ' + e.message;
+  }
+  btn.disabled = false; btn.textContent = '⬆ LOAD STL';
+}
+
+// ── Select tab (③ SELECT FACES) — mesh-based painting ─────────
+let selScene, selCamera, selRenderer;
+let selDragging=false, selRotX=-1.0, selRotY=0.5, selRotZ=0.5, selZoom=1.5, selLast={x:0,y:0};
+let selPcdCentroid=[0,0,0], selPcdPoints=null, selPcdLabels=null, selPcdColors=null, selMeshStlBuf=null, selMeshPositions=null;
+
+// ── Inset mesh viewer ─────────────────────────────────────────
+let insetRenderer=null, insetScene=null, insetCamera=null;
+let insetMesh=null, insetMeshGeo=null, insetColors=null;
+
+function initInsetViewer() {
+  const canvas = document.getElementById('inset-canvas');
+  if (!canvas) return;
+  insetScene    = new THREE.Scene();
+  insetCamera   = new THREE.PerspectiveCamera(45, 1, 0.001, 100);
+  insetCamera.position.set(0, 0, 1.5);
+  insetRenderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  insetRenderer.setSize(200, 200);
+  insetRenderer.setClearColor(0x0a0f1a, 1);
+  insetScene.add(new THREE.AmbientLight(0xffffff, 1.5));
+  const dl = new THREE.DirectionalLight(0xffffff, 1);
+  dl.position.set(1, 2, 3); insetScene.add(dl);
+  insetScene.add(new THREE.GridHelper(2, 10, 0x222233, 0x111122));
+}
+
+let insetBaseColors = null;
+
+function loadMeshIntoInset(stlBuf) {
+  if (!insetScene) return;
+  const geo = parseSTLBinary(stlBuf);
+  geo.computeBoundingBox();
+  const ctr = new THREE.Vector3(); geo.boundingBox.getCenter(ctr);
+  geo.translate(-ctr.x, -ctr.y, -ctr.z);
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  insetCamera.position.z = Math.max(sz.x, sz.y, sz.z) * 1.8;
+
+  const nTris = geo.attributes.position.count / 3;
+  insetColors     = new Float32Array(nTris * 3 * 3);
+  insetBaseColors = new Float32Array(nTris * 3 * 3);
+  const mPos = geo.attributes.position;
+
+  if (rawPoints && rawPoints.length) {
+    const pts = rawPoints, cols = rawColors, np = pts.length;
+
+    // Mesh is in metres (save_mm=False). Points are also in metres.
+    // Use mesh bbox centre (ctr) directly to align both coordinate spaces.
+    const refX=ctr.x, refY=ctr.y, refZ=ctr.z;
+
+    // Downsample to ~8000 points for speed
+    const step = Math.max(1, Math.floor(np/8000));
+    const spx=[],spy=[],spz=[],spr=[],spg=[],spb=[];
+    for(let i=0;i<np;i+=step){
+      spx.push(pts[i][0]-refX);
+      spy.push(pts[i][1]-refY);
+      spz.push(pts[i][2]-refZ);
+      if(cols&&cols[i]){spr.push(cols[i][0]);spg.push(cols[i][1]);spb.push(cols[i][2]);}
+      else{spr.push(0.5);spg.push(0.5);spb.push(0.5);}
+    }
+    const ns=spx.length;
+
+    for(let t=0;t<nTris;t++){
+      const i=t*3;
+      const tx=(mPos.getX(i)+mPos.getX(i+1)+mPos.getX(i+2))/3;
+      const ty=(mPos.getY(i)+mPos.getY(i+1)+mPos.getY(i+2))/3;
+      const tz=(mPos.getZ(i)+mPos.getZ(i+1)+mPos.getZ(i+2))/3;
+      let bestD=Infinity,bestI=0;
+      for(let p=0;p<ns;p++){
+        const dx=spx[p]-tx,dy=spy[p]-ty,dz=spz[p]-tz,d=dx*dx+dy*dy+dz*dz;
+        if(d<bestD){bestD=d;bestI=p;}
+      }
+      const r=spr[bestI],g=spg[bestI],b=spb[bestI];
+      const vi=t*3;
+      for(let v=0;v<3;v++){
+        insetBaseColors[(vi+v)*3]=r;insetBaseColors[(vi+v)*3+1]=g;insetBaseColors[(vi+v)*3+2]=b;
+        insetColors[(vi+v)*3]=r;   insetColors[(vi+v)*3+1]=g;    insetColors[(vi+v)*3+2]=b;
+      }
+    }
+  } else {
+    for(let i=0;i<nTris*9;i+=3){insetBaseColors[i]=0.5;insetBaseColors[i+1]=0.5;insetBaseColors[i+2]=0.5;}
+    insetColors.set(insetBaseColors);
+  }
+
+  geo.setAttribute('color', new THREE.BufferAttribute(insetColors, 3));
+  geo.attributes.color.needsUpdate = true;
+  if (insetMesh) { insetScene.remove(insetMesh); insetMesh=null; }
+  insetMeshGeo = geo;
+  insetMesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    vertexColors: true, shininess: 40, side: THREE.DoubleSide
+  }));
+  insetScene.add(insetMesh);
+}
+
+function updateInsetFromPoints() {
+  if (!insetMesh || !insetMeshGeo || !triLabels || !insetBaseColors) return;
+  const nTris = insetMeshGeo.attributes.position.count / 3;
+  for(let t=0;t<nTris&&t<triLabels.length;t++){
+    const vi=t*3;
+    if(triLabels[t]===1){
+      for(let v=0;v<3;v++){
+        insetColors[(vi+v)*3]  =insetBaseColors[(vi+v)*3]*0.3;
+        insetColors[(vi+v)*3+1]=insetBaseColors[(vi+v)*3+1]*0.3+0.3;
+        insetColors[(vi+v)*3+2]=insetBaseColors[(vi+v)*3+2]*0.3+0.7;
+      }
+    } else {
+      for(let v=0;v<3;v++){
+        insetColors[(vi+v)*3]  =insetBaseColors[(vi+v)*3];
+        insetColors[(vi+v)*3+1]=insetBaseColors[(vi+v)*3+1];
+        insetColors[(vi+v)*3+2]=insetBaseColors[(vi+v)*3+2];
+      }
+    }
+  }
+  insetMeshGeo.attributes.color.needsUpdate=true;
+}
+let selMesh = null;              // THREE.Mesh being painted on
+let selMeshGeo = null;           // the geometry
+let selHoverMesh  = null;        // overlay: filled highlight of hovered tris
+let selHoverEdges = null;        // overlay: wireframe edge outline of hovered tris
+let selHoveredTris = [];         // indices of currently hovered triangles
+let triLabels = null;            // Int8Array: 0=unpainted, 1=clean, 2=avoid, per triangle
+let triColors = null;            // Float32Array: RGB per vertex (3 verts per tri × 3)
+let selPainting = false;
 let currentBrush = 'clean';
-let brushSize    = 20;
-let paintColors  = null;
-let pointLabels  = null;
-let rawPoints    = null;
+let brushSize = 20;
+// Raycaster for mesh face picking
+const selRaycaster = new THREE.Raycaster();
 
 function initSelectViewer() {
   const canvas = document.getElementById('select-canvas');
   const wrap   = document.getElementById('select-canvas-wrap');
-  const W = wrap.clientWidth  || 800;
-  const H = wrap.clientHeight || 600;
-
+  const W = wrap.clientWidth || 800, H = wrap.clientHeight || 600;
   selScene    = new THREE.Scene();
   selCamera   = new THREE.PerspectiveCamera(60, W/H, 0.001, 100);
   selCamera.position.set(0, 0, selZoom);
   selRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   selRenderer.setSize(W, H);
   selRenderer.setClearColor(0x000813);
+  selScene.add(new THREE.AmbientLight(0x334455, 2));
+  const dl = new THREE.DirectionalLight(0xffffff, 1);
+  dl.position.set(2,3,4); selScene.add(dl);
+  selScene.add(new THREE.GridHelper(2, 20, 0x222233, 0x111122));
 
   canvas.addEventListener('mousedown', e => {
-    if (e.shiftKey) { selPainting=true; paint(e); }
-    else { selDragging=true; selLast={x:e.clientX,y:e.clientY}; }
+    if (e.shiftKey) { selPainting=true; paintFace(e); }
+    else            { selDragging=true; selLast={x:e.clientX,y:e.clientY}; }
   });
   canvas.addEventListener('mouseup',   () => { selDragging=false; selPainting=false; });
   canvas.addEventListener('mousemove', e => {
-    if (selPainting) { paint(e); return; }
-    if (!selDragging) return;
-    selRotY += (e.clientX - selLast.x) * 0.01;
-    selRotX += (e.clientY - selLast.y) * 0.01;
-    selLast = {x:e.clientX,y:e.clientY};
+    if (selPainting) { paintFace(e); return; }
+    if (selDragging) {
+      selRotZ += (e.clientX-selLast.x)*0.01;
+      selLast = {x:e.clientX,y:e.clientY};
+      clearHover(); return;
+    }
+    updateHover(e);
   });
+  canvas.addEventListener('mouseleave', () => clearHover());
   canvas.addEventListener('wheel', e => {
-    selZoom += e.deltaY*0.002;
-    selZoom = Math.max(0.5,Math.min(3,selZoom));
+    selZoom += e.deltaY*0.002; selZoom=Math.max(0.3,Math.min(5,selZoom));
   });
-
-  function animate() {
+  (function animate(){
     requestAnimationFrame(animate);
-    if (selPoints) { selPoints.rotation.x=selRotX; selPoints.rotation.y=selRotY; }
+    if (selMesh)      { selMesh.rotation.x=selRotX;      selMesh.rotation.z=selRotZ; }
+    if (selHoverMesh) { selHoverMesh.rotation.x=selRotX; selHoverMesh.rotation.z=selRotZ; }
+    if (selHoverEdges){ selHoverEdges.rotation.x=selRotX;selHoverEdges.rotation.z=selRotZ; }
+    if (selPcdPoints) { selPcdPoints.rotation.x=selRotX; selPcdPoints.rotation.z=selRotZ; }
+    if (insetMesh)    { insetMesh.rotation.x=selRotX;    insetMesh.rotation.z=selRotZ; }
     selCamera.position.z = selZoom;
     selRenderer.render(selScene, selCamera);
+    if (insetRenderer && insetScene) insetRenderer.render(insetScene, insetCamera);
+  })();
+}
+
+function loadMeshIntoSelectViewer(stlBuf) {
+  selMeshStlBuf = stlBuf;
+
+  // Remove old objects
+  if (selPcdPoints) { selScene.remove(selPcdPoints); selPcdPoints=null; }
+  if (selMesh)      { selScene.remove(selMesh);      selMesh=null; }
+  if (selHoverMesh) { selScene.remove(selHoverMesh); selHoverMesh=null; }
+  if (selHoverEdges){ selScene.remove(selHoverEdges);selHoverEdges=null; }
+  selHoveredTris = [];
+
+  // ── Paintable mesh ───────────────────────────────────────────
+  const geo = parseSTLBinary(stlBuf);
+  geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  const ctr = new THREE.Vector3(); geo.boundingBox.getCenter(ctr);
+  geo.translate(-ctr.x, -ctr.y, -ctr.z);
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  selZoom = Math.max(sz.x, sz.y, sz.z) * 1.8;
+
+  const nTris = geo.attributes.position.count / 3;
+  triLabels = new Int8Array(nTris).fill(2);
+  triColors = new Float32Array(nTris * 3 * 3);
+  for(let ti=0; ti<nTris*3; ti++){triColors[ti*3]=1.0; triColors[ti*3+1]=0.2; triColors[ti*3+2]=0.2;}
+  geo.setAttribute('color', new THREE.BufferAttribute(triColors, 3));
+
+  selMeshGeo = geo;
+  selMesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    vertexColors: true, shininess: 50, side: THREE.DoubleSide
+  }));
+  selScene.add(selMesh);
+
+  // ── Transparent point cloud overlay ─────────────────────────
+  if (rawPoints && rawPoints.length) {
+    const pts = rawPoints, cols = rawColors, n = pts.length;
+    const filtPos = new Float32Array(n*3), filtCol = new Float32Array(n*3);
+    for(let i=0;i<n;i++){
+      // Points are already centred around zero in metres — just scale to mm
+      filtPos[i*3]  = pts[i][0]*1000;
+      filtPos[i*3+1]= pts[i][1]*1000;
+      filtPos[i*3+2]= pts[i][2]*1000;
+      if(cols && cols[i]){ filtCol[i*3]=cols[i][0]; filtCol[i*3+1]=cols[i][1]; filtCol[i*3+2]=cols[i][2]; }
+      else { filtCol[i*3]=0.7; filtCol[i*3+1]=0.7; filtCol[i*3+2]=0.7; }
+    }
+    const pcdGeo = new THREE.BufferGeometry();
+    pcdGeo.setAttribute('position', new THREE.BufferAttribute(filtPos, 3));
+    pcdGeo.setAttribute('color',    new THREE.BufferAttribute(filtCol, 3));
+    selPcdPoints = new THREE.Points(pcdGeo, new THREE.PointsMaterial({
+      size: 1.5, vertexColors: true, sizeAttenuation: false,
+      transparent: true, opacity: 0.5, depthWrite: false
+    }));
+    selScene.add(selPcdPoints);
   }
-  animate();
+
+  document.getElementById('select-status').textContent =
+    `${nTris} faces — SHIFT+drag to paint`;
+  document.getElementById('btn-proceed-robot').disabled = false;
+  updateTriCounts();
+  loadMeshIntoInset(stlBuf);
 }
 
-function updateSelectViewer(data) {
-  if (!selScene || !data.points || data.points.length === 0) return;
-  rawPoints   = data.points;
-  paintColors = new Float32Array(data.points.length * 3).fill(0.4);
-  pointLabels = new Int8Array(data.points.length);
-  rebuildSelectPoints();
-}
-
-function rebuildSelectPoints() {
-  if (selPoints) selScene.remove(selPoints);
-  if (!rawPoints) return;
-  const positions = new Float32Array(rawPoints.flat());
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('color',    new THREE.BufferAttribute(paintColors.slice(), 3));
-  const mat = new THREE.PointsMaterial({ size: 0.004, vertexColors: true });
-  selPoints = new THREE.Points(geo, mat);
-  selScene.add(selPoints);
-}
-
-function paint(e) {
-  if (!rawPoints || !selPoints) return;
-  const canvas = document.getElementById('select-canvas');
-  const rect   = canvas.getBoundingClientRect();
-  const mx = ((e.clientX - rect.left) / rect.width)  * 2 - 1;
-  const my = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
-
-  const projMatrix = new THREE.Matrix4().multiplyMatrices(
-    selCamera.projectionMatrix,
-    new THREE.Matrix4().multiplyMatrices(
-      selCamera.matrixWorldInverse, selPoints.matrixWorld));
-
-  const brushR = brushSize / canvas.width * 2;
-  const col   = currentBrush === 'clean' ? [0.2,0.5,1] :
-                currentBrush === 'avoid' ? [1,0.2,0.2] : [0.4,0.4,0.4];
-  const label = currentBrush === 'clean' ? 1 : currentBrush === 'avoid' ? 2 : 0;
-  let changed = false;
-
-  for (let i = 0; i < rawPoints.length; i++) {
-    const v = new THREE.Vector4(rawPoints[i][0], rawPoints[i][1], rawPoints[i][2], 1);
-    v.applyMatrix4(projMatrix);
-    const sx = v.x / v.w, sy = v.y / v.w;
-    if (Math.sqrt((sx-mx)**2 + (sy-my)**2) < brushR) {
-      paintColors[i*3]   = col[0];
-      paintColors[i*3+1] = col[1];
-      paintColors[i*3+2] = col[2];
-      pointLabels[i] = label;
-      changed = true;
+function paintFace(e) {
+  if (!selMesh || !selMeshGeo) return;
+  const tris = _getHoverCandidates(e);
+  if (!tris.length) return;
+  const col   = currentBrush==='clean' ? [0.2,0.5,1] :
+                currentBrush==='avoid' ? [1,0.2,0.2] : [0.35,0.35,0.35];
+  const label = currentBrush==='clean' ? 1 : currentBrush==='avoid' ? 2 : 0;
+  for (const t of tris) {
+    const i = t*3;
+    triLabels[t] = label;
+    for (let v=0; v<3; v++) {
+      triColors[(i+v)*3]=col[0]; triColors[(i+v)*3+1]=col[1]; triColors[(i+v)*3+2]=col[2];
     }
   }
-  if (changed) {
-    selPoints.geometry.attributes.color.array.set(paintColors);
-    selPoints.geometry.attributes.color.needsUpdate = true;
+  selMeshGeo.attributes.color.needsUpdate = true;
+  updateTriCounts();
+  updateInsetFromPoints();
+  updateHover(e);
+}
+
+function _getHoverCandidates(e) {
+  if (!selMesh || !selMeshGeo) return [];
+  const canvas = document.getElementById('select-canvas');
+  const rect   = canvas.getBoundingClientRect();
+  const mouse  = new THREE.Vector2(
+    ((e.clientX-rect.left)/rect.width)*2-1,
+   -((e.clientY-rect.top)/rect.height)*2+1
+  );
+  selMesh.rotation.set(selRotX, 0, selRotZ);
+  selMesh.updateMatrixWorld();
+  selRaycaster.setFromCamera(mouse, selCamera);
+  const hits = selRaycaster.intersectObject(selMesh);
+  if (!hits.length) return [];
+  const hitDepth  = hits[0].point.clone().project(selCamera).z;
+  const camPos    = selCamera.position.clone();
+  const projMtx   = new THREE.Matrix4().multiplyMatrices(
+    selCamera.projectionMatrix, selCamera.matrixWorldInverse
+  ).multiply(selMesh.matrixWorld);
+  const normalMtx = new THREE.Matrix3().getNormalMatrix(selMesh.matrixWorld);
+  const pos = selMeshGeo.attributes.position;
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const brushR = brushSize;
+  const result = [];
+  const nTris = pos.count / 3;
+  for (let t = 0; t < nTris; t++) {
+    const i = t*3;
+    const ax=pos.getX(i), ay=pos.getY(i), az=pos.getZ(i);
+    const bx=pos.getX(i+1),by=pos.getY(i+1),bz=pos.getZ(i+1);
+    const cx=pos.getX(i+2),cy=pos.getY(i+2),cz=pos.getZ(i+2);
+    const e1x=bx-ax,e1y=by-ay,e1z=bz-az, e2x=cx-ax,e2y=cy-ay,e2z=cz-az;
+    const localNorm = new THREE.Vector3(
+      e1y*e2z-e1z*e2y, e1z*e2x-e1x*e2z, e1x*e2y-e1y*e2x
+    ).applyMatrix3(normalMtx).normalize();
+    const centreWorld = new THREE.Vector3((ax+bx+cx)/3,(ay+by+cy)/3,(az+bz+cz)/3)
+                          .applyMatrix4(selMesh.matrixWorld);
+    if (localNorm.dot(camPos.clone().sub(centreWorld).normalize()) <= 0) continue;
+    const v4 = new THREE.Vector4((ax+bx+cx)/3,(ay+by+cy)/3,(az+bz+cz)/3,1).applyMatrix4(projMtx);
+    if (v4.w <= 0) continue;
+    const sx=(v4.x/v4.w*0.5+0.5)*rect.width, sy=(-v4.y/v4.w*0.5+0.5)*rect.height;
+    if (Math.sqrt((sx-mx)**2+(sy-my)**2) >= brushR) continue;
+    if (v4.z/v4.w > hitDepth + 0.01) continue;
+    result.push(t);
   }
+  return result;
+}
+
+function updateHover(e) {
+  if (!selMesh || !selMeshGeo) return;
+  const tris = _getHoverCandidates(e);
+  if (tris.length === selHoveredTris.length && tris.every((v,i) => v === selHoveredTris[i])) return;
+  selHoveredTris = tris;
+  if (selHoverMesh)  { selScene.remove(selHoverMesh);  selHoverMesh=null;  }
+  if (selHoverEdges) { selScene.remove(selHoverEdges); selHoverEdges=null; }
+  if (!tris.length) return;
+
+  const pos = selMeshGeo.attributes.position;
+  const RAISE = 0.003;
+  const normalMtx2 = new THREE.Matrix3().getNormalMatrix(selMesh.matrixWorld);
+  const hoverPositions = [], edgePositions = [];
+
+  for (const t of tris) {
+    const i = t*3;
+    const verts = [0,1,2].map(v => new THREE.Vector3(pos.getX(i+v),pos.getY(i+v),pos.getZ(i+v)));
+    const norm = new THREE.Vector3()
+      .crossVectors(
+        new THREE.Vector3().subVectors(verts[1],verts[0]),
+        new THREE.Vector3().subVectors(verts[2],verts[0])
+      ).applyMatrix3(normalMtx2).normalize();
+    for (const v of verts) {
+      const r = v.clone().addScaledVector(norm, RAISE);
+      hoverPositions.push(r.x,r.y,r.z);
+    }
+    for (let v=0;v<3;v++) {
+      const a=verts[v].clone().addScaledVector(norm,RAISE*1.5);
+      const b=verts[(v+1)%3].clone().addScaledVector(norm,RAISE*1.5);
+      edgePositions.push(a.x,a.y,a.z, b.x,b.y,b.z);
+    }
+  }
+
+  const fillCol = currentBrush==='clean' ? 0x4499ff : currentBrush==='avoid' ? 0xff4444 : 0xffffff;
+  const fillGeo = new THREE.BufferGeometry();
+  fillGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(hoverPositions),3));
+  selHoverMesh = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({
+    color:fillCol, transparent:true, opacity:0.28, side:THREE.DoubleSide, depthWrite:false
+  }));
+  selHoverMesh.rotation.set(selRotX, 0, selRotZ);
+  selScene.add(selHoverMesh);
+
+  const edgeGeo = new THREE.BufferGeometry();
+  edgeGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(edgePositions),3));
+  selHoverEdges = new THREE.LineSegments(edgeGeo, new THREE.LineBasicMaterial({
+    color:fillCol, transparent:true, opacity:0.95, depthWrite:false
+  }));
+  selHoverEdges.rotation.set(selRotX, 0, selRotZ);
+  selScene.add(selHoverEdges);
+}
+
+function clearHover() {
+  if (selHoverMesh)  { selScene.remove(selHoverMesh);  selHoverMesh=null;  }
+  if (selHoverEdges) { selScene.remove(selHoverEdges); selHoverEdges=null; }
+  selHoveredTris = [];
+}
+
+function updateTriCounts() {
+  if (!triLabels) return;
+  let clean=0, avoid=0;
+  for(let i=0;i<triLabels.length;i++){ if(triLabels[i]===1) clean++; else if(triLabels[i]===2) avoid++; }
+  const ce=document.getElementById('sel-clean-count'), ae=document.getElementById('sel-avoid-count');
+  if(ce) ce.textContent=clean; if(ae) ae.textContent=avoid;
+}
+
+let rawPoints = null, rawColors = null;
+function updateSelectViewer(data) {
+  if (data.points) rawPoints = data.points;
+  if (data.colors) rawColors = data.colors;
+}
+
+async function proceedToRobot() {
+  if (!builtMeshData) { alert('Build a mesh first (② MESH).'); return; }
+  if (!triLabels) { alert('Paint some faces first.'); return; }
+  const cleanIdx=[], avoidIdx=[];
+  for(let i=0;i<triLabels.length;i++){
+    if(triLabels[i]===1) cleanIdx.push(i);
+    else if(triLabels[i]===2) avoidIdx.push(i);
+  }
+  if(!cleanIdx.length){ alert('Paint at least one clean zone first.'); return; }
+
+  const btn      = document.getElementById('btn-proceed-robot');
+  const statusEl = document.getElementById('export-status');
+  btn.disabled   = true;
+  statusEl.textContent = 'Splitting mesh by painted zones…';
+
+  try {
+    const filename = document.getElementById('export-filename').value.trim();
+    const res = await fetch('/api/mesh/split', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        stl_path:     builtMeshData.stlPath,
+        clean_tris:   cleanIdx,
+        avoid_tris:   avoidIdx,
+        filename,
+      })
+    });
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      statusEl.textContent = '✗ ' + (data.message || 'Split failed');
+      btn.disabled = false; return;
+    }
+    statusEl.textContent = '✔ Zones ready — switching to robot control';
+    switchTab('robot');
+  } catch(e) {
+    statusEl.textContent = '✗ Error: ' + e.message;
+  }
+  btn.disabled = false;
 }
 
 function setBrush(type) {
@@ -1107,211 +1671,190 @@ function setBrush(type) {
 }
 
 function clearPaint() {
-  if (!paintColors) return;
-  paintColors.fill(0.4);
-  pointLabels.fill(0);
-  selPoints.geometry.attributes.color.array.set(paintColors);
-  selPoints.geometry.attributes.color.needsUpdate = true;
-}
-
-async function exportSTLs() {
-  if (!pointLabels || !rawPoints) {
-    alert('No pointcloud to export. Complete a scan first.');
-    return;
-  }
-  const cleanIdx = [], avoidIdx = [];
-  for (let i = 0; i < pointLabels.length; i++) {
-    if (pointLabels[i] === 1) cleanIdx.push(i);
-    else if (pointLabels[i] === 2) avoidIdx.push(i);
-  }
-  if (cleanIdx.length === 0 && avoidIdx.length === 0) {
-    alert('Paint some areas first using Shift+drag.');
-    return;
-  }
-  document.getElementById('export-status').textContent = 'Generating STLs...\nThis may take a minute.';
-  document.getElementById('btn-export').disabled = true;
-
-  const res  = await fetch('/api/export/stl', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ clean_indices: cleanIdx, avoid_indices: avoidIdx,
-                           filename: document.getElementById('export-filename').value.trim() })
-  });
-  const data = await res.json();
-  document.getElementById('btn-export').disabled = false;
-  if (data.status === 'ok') {
-    const fn=document.getElementById('export-filename').value.trim();
-    if(fn)document.getElementById('preview-filename').value=fn;
-    document.getElementById('export-status').textContent =
-      `✔ Exported!\nClean: ${cleanIdx.length} pts\nAvoid: ${avoidIdx.length} pts\nSent to MoveIt`;
-    updateSceneObjects();
-  } else {
-    document.getElementById('export-status').textContent = '✗ Export failed';
-  }
-}
-
-async function exportPrimitive() {
-  if (!rawPoints || rawPoints.length === 0) { alert('No pointcloud to export. Complete a scan first.'); return; }
-  const primitive = document.getElementById('primitive-type').value;
-  // Build indices from pointLabels the same way exportSTLs() does
-  const cleanIdx = [], avoidIdx = [];
-  if (pointLabels) {
-    for (let i = 0; i < pointLabels.length; i++) {
-      if (pointLabels[i] === 1) cleanIdx.push(i);
-      else if (pointLabels[i] === 2) avoidIdx.push(i);
+  if (triLabels) {
+    triLabels.fill(2);
+    if (triColors) {
+      for(let ti=0;ti<triLabels.length*3;ti++){triColors[ti*3]=1;triColors[ti*3+1]=0.2;triColors[ti*3+2]=0.2;}
     }
+    if (selMeshGeo) selMeshGeo.attributes.color.needsUpdate=true;
   }
-  const filename = document.getElementById('export-filename').value.trim();
-  if (!cleanIdx.length && !avoidIdx.length) { alert('Paint at least one region first using Shift+drag.'); return; }
-  if (primitive === 'lowpoly') {
-    document.getElementById('export-status').textContent =
-      'Tip: Low-poly decimates the full surface STL. Use \u25c8 BOTH + PREVIEW to export both at once.';
-  }
-  document.getElementById('export-status').textContent = `Fitting ${primitive}…`;
-  document.getElementById('btn-primitive').disabled = true;
+  updateTriCounts();
+  updateInsetFromPoints();
+  document.getElementById('export-status').textContent='';
+}
+
+// Legacy stubs — no longer used but kept to avoid reference errors
+function exportSTLs() { alert('Use ② MESH to build, then ③ SELECT FACES to proceed.'); }
+function proceedWithMesh() { proceedToRobot(); }
+function exportPrimitive() { alert('Use ② MESH to build the mesh first.'); }
+function exportBothAndPreview() { proceedToRobot(); }
+
+async function startSystem() {
+  const btn  = document.getElementById('btn-startup');
+  const pill = document.getElementById('startup-status-pill');
+  const log  = document.getElementById('startup-log');
+  btn.disabled = true;
+  btn.textContent = '⏳ STARTING…';
+  pill.textContent = 'RUNNING';
+  pill.style.background = '#1a2a3a';
+  pill.style.color = 'var(--blue)';
+  log.textContent = '';
+  // Auto-show log while running
+  document.getElementById('startup-log-wrap').style.display = 'block';
+  document.getElementById('btn-startup-toggle-log').textContent = 'Hide log';
   try {
-    const res  = await fetch('/api/export/primitive', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ primitive, clean_indices: cleanIdx, avoid_indices: avoidIdx, filename,
-                             hull_detail: +(document.getElementById('hull-detail')?.value ?? 50),
-                             lowpoly_tris: +(document.getElementById('lowpoly-tris')?.value ?? 200) })
-    });
+    const res  = await fetch('/api/startup', { method: 'POST' });
     const data = await res.json();
-    document.getElementById('export-status').textContent =
-      data.status === 'ok' ? `✔ ${primitive} fitted → MoveIt` : `✗ Fit failed: ${data.message || ''}`;
+    if (data.status === 'error') {
+      pill.textContent = 'ERROR';
+      pill.style.color = 'var(--red)';
+      btn.textContent = '⚡ RETRY STARTUP';
+      btn.disabled = false;
+    }
   } catch(e) {
-    document.getElementById('export-status').textContent = '✗ Network error';
-  }
-  document.getElementById('btn-primitive').disabled = false;
-}
-
-// ── Robot viewer (Tab 3) ───────────────────────────────────────
-let robotScene, robotCamera, robotRenderer;
-let robDragging = false, robLast = {x:0,y:0};
-let robRotX = 0.3, robRotY = 0.5, robZoom = 3;
-let sceneObjects = [];
-
-function initRobotViewer() {
-  const canvas = document.getElementById('robot-canvas');
-  const wrap   = document.getElementById('robot-canvas-wrap');
-  const W = wrap.clientWidth  || 800;
-  const H = wrap.clientHeight || 600;
-
-  robotScene    = new THREE.Scene();
-  robotCamera   = new THREE.PerspectiveCamera(60, W/H, 0.01, 100);
-  robotCamera.position.set(0, 0, robZoom);
-  robotRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  robotRenderer.setSize(W, H);
-  robotRenderer.setClearColor(0x000813);
-
-  const grid = new THREE.GridHelper(2, 20, 0x333355, 0x222233);
-  robotScene.add(grid);
-  drawSimpleRobot();
-  robotScene.add(new THREE.AmbientLight(0x334455, 2));
-  const dirLight = new THREE.DirectionalLight(0xffffff, 1);
-  dirLight.position.set(5, 5, 5);
-  robotScene.add(dirLight);
-
-  canvas.addEventListener('mousedown', e => { robDragging=true; robLast={x:e.clientX,y:e.clientY}; });
-  canvas.addEventListener('mouseup',   () => robDragging=false);
-  canvas.addEventListener('mousemove', e => {
-    if (!robDragging) return;
-    robRotY += (e.clientX-robLast.x)*0.01;
-    robRotX += (e.clientY-robLast.y)*0.01;
-    robLast = {x:e.clientX,y:e.clientY};
-  });
-  canvas.addEventListener('wheel', e => {
-    robZoom += e.deltaY*0.01;
-    robZoom = Math.max(1,Math.min(10,robZoom));
-  });
-
-  function animate() {
-    requestAnimationFrame(animate);
-    robotScene.rotation.y = robRotY;
-    robotScene.rotation.x = robRotX;
-    robotCamera.position.z = robZoom;
-    robotRenderer.render(robotScene, robotCamera);
-  }
-  animate();
-}
-
-function drawSimpleRobot() {
-  const mat      = new THREE.MeshPhongMaterial({ color: 0x2266aa, shininess: 80 });
-  const matJoint = new THREE.MeshPhongMaterial({ color: 0x334455 });
-
-  const addBox = (w,h,d,x,y,z,m=mat) => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), m);
-    mesh.position.set(x,y,z);
-    robotScene.add(mesh);
-  };
-  const addCyl = (r,h,x,y,z) => {
-    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,16), matJoint);
-    mesh.position.set(x,y,z);
-    robotScene.add(mesh);
-  };
-
-  addBox(0.2,0.05,0.2,  0,0,0);
-  addCyl(0.06,0.06,      0,0.055,0);
-  addBox(0.06,0.3,0.06,  0,0.18,0);
-  addCyl(0.05,0.05,      0,0.35,0);
-  addBox(0.05,0.25,0.05, 0.12,0.42,0);
-  addCyl(0.04,0.04,      0.24,0.42,0);
-  addBox(0.04,0.15,0.04, 0.24,0.56,0);
-  addBox(0.03,0.06,0.03, 0.24,0.67,0);
-}
-
-function addSceneObject(name, color, x, y, z) {
-  const geo  = new THREE.BoxGeometry(0.1,0.1,0.1);
-  const mat  = new THREE.MeshPhongMaterial({ color, transparent:true, opacity:0.6 });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(x, y+0.05, z);
-  mesh.userData.name = name;
-  robotScene.add(mesh);
-  const wMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, wireframe:true }));
-  mesh.add(wMesh);
-  sceneObjects.push(mesh);
-  updateSceneObjects();
-}
-
-function updateSceneObjects() {
-  const el = document.getElementById('scene-objects');
-  el.innerHTML = sceneObjects.length === 0
-    ? 'No objects in scene'
-    : sceneObjects.map(o => `<div style="color:var(--text)">◈ ${o.userData.name}</div>`).join('');
-}
-
-async function sendToMoveIt(type) {
-  const x = +document.getElementById('obj-x').value;
-  const y = +document.getElementById('obj-y').value;
-  const z = +document.getElementById('obj-z').value;
-  const path  = type === 'clean'
-    ? (config.clean_stl_path || '~/scan_clean.stl')
-    : (config.avoid_stl_path || '~/scan_avoid.stl');
-  const name  = type === 'clean' ? 'clean_zone' : 'avoid_zone';
-  const color = type === 'clean' ? 0xff4444 : 0x4488ff;
-
-  document.getElementById('moveit-status').textContent = `Sending ${type} zone to MoveIt...`;
-  const res  = await fetch('/api/moveit/send', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ path, name, x, y, z })
-  });
-  const data = await res.json();
-  if (data.status === 'ok') {
-    document.getElementById('moveit-status').textContent = `✔ ${name} added to MoveIt scene`;
-    addSceneObject(name, color, x, y, z);
-  } else {
-    document.getElementById('moveit-status').textContent = `✗ Failed — is ROS2 running?`;
+    pill.textContent = 'ERROR';
+    pill.style.color = 'var(--red)';
+    btn.textContent = '⚡ RETRY STARTUP';
+    btn.disabled = false;
   }
 }
 
-async function clearMoveItScene() {
-  sceneObjects.forEach(o => robotScene.remove(o));
-  sceneObjects = [];
-  updateSceneObjects();
-  document.getElementById('moveit-status').textContent = 'Scene cleared';
+function toggleStartupLog() {
+  const wrap = document.getElementById('startup-log-wrap');
+  const btn  = document.getElementById('btn-startup-toggle-log');
+  const vis  = wrap.style.display !== 'none';
+  wrap.style.display = vis ? 'none' : 'block';
+  btn.textContent = vis ? 'Show log' : 'Hide log';
 }
 
+
+function initRobotControls() {
+  // ── Startup sequence events ───────────────────────────────
+  socket.on('startup_log', d => {
+    const el = document.getElementById('startup-log');
+    if (!el) return;
+    el.textContent += d.line + '\n';
+    el.scrollTop = el.scrollHeight;
+  });
+  socket.on('startup_done', d => {
+    const pill = document.getElementById('startup-status-pill');
+    const btn  = document.getElementById('btn-startup');
+    if (d.code === 0) {
+      pill.textContent = 'READY';
+      pill.style.background = '#1a3a1a';
+      pill.style.color = 'var(--green)';
+      btn.textContent = '✔ SYSTEM READY';
+      btn.style.background = 'var(--green)';
+    } else {
+      pill.textContent = 'ERROR';
+      pill.style.background = '#3a1a1a';
+      pill.style.color = 'var(--red)';
+      btn.textContent = '⚡ RETRY STARTUP';
+      btn.style.background = 'var(--blue)';
+    }
+    btn.disabled = false;
+    // Auto-show log on error
+    if (d.code !== 0) {
+      document.getElementById('startup-log-wrap').style.display = 'block';
+      document.getElementById('btn-startup-toggle-log').textContent = 'Hide log';
+    }
+  });
+
+  socket.on('robot_log', d => appendRobotLog(d.line));
+  socket.on('robot_done', d => { appendRobotLog(d.message); setRobotStage('idle'); });
+  socket.on('preview_face', d => {
+    const tl = d.type.toUpperCase();
+    document.getElementById('face-confirm-info').innerHTML =
+      `<b>Face ${d.index+1}</b>: <span style="color:var(--yellow)">${d.label}</span> (${tl}) — <b>${d.stripes}</b> stripes<br>`+
+      `<span style="color:var(--muted);font-size:10px">Planning… watch RViz for trajectory.</span>`;
+    document.getElementById('btn-next-face').disabled = true;
+    appendRobotLog(`[PREVIEW] Face ${d.index+1}: ${d.label} (${tl}), ${d.stripes} stripes`);
+  });
+  socket.on('preview_face_done', d => {
+    document.getElementById('btn-next-face').disabled = false;
+    document.getElementById('face-confirm-info').innerHTML =
+      document.getElementById('face-confirm-info').innerHTML.replace(
+        'Planning… watch RViz for trajectory.','✔ Trajectory in RViz — press Next Face.');
+    const dot = document.createElement('span');
+    dot.textContent = `✔ Face ${d.index+1}`;
+    dot.style.cssText = 'background:#1a3a1a;color:var(--green);border:1px solid var(--green);border-radius:10px;padding:2px 8px;font-size:10px';
+    document.getElementById('face-progress-dots').appendChild(dot);
+  });
+  socket.on('preview_all_done', () => {
+    document.getElementById('btn-next-face').disabled = true;
+    document.getElementById('face-confirm-info').innerHTML = '<span style="color:var(--green)">✔ All faces previewed.</span>';
+    document.getElementById('robot-final-confirm').style.display = 'block';
+    setRobotStatus('All faces previewed — confirm execution or cancel.');
+    appendRobotLog('[PREVIEW] All faces done.');
+  });
+  socket.on('preview_aborted', () => { setRobotStatus('Preview cancelled.'); setRobotStage('idle'); appendRobotLog('[PREVIEW] Aborted.'); });
+  socket.on('coverage_update', d => {
+    document.getElementById('coverage-pct').textContent     = d.pct.toFixed(1) + '%';
+    document.getElementById('coverage-bar').style.width     = Math.min(d.pct,100) + '%';
+    document.getElementById('coverage-stripes').textContent = d.stripe;
+    document.getElementById('coverage-area').textContent    = `${d.covered_cm2.toFixed(0)} / ${d.total_cm2.toFixed(0)} cm²`;
+    const hue = Math.round(120 - d.pct * 1.2);
+    document.getElementById('coverage-bar').style.background = `hsl(${Math.max(0,hue)},80%,45%)`;
+  });
+}
+function setRobotStatus(msg) { document.getElementById('moveit-status').textContent = msg; }
+function appendRobotLog(line) {
+  if (['PREVIEW_ALL_DONE','PREVIEW_ABORTED'].includes(line) || line.startsWith('PREVIEW_FACE') || line.startsWith('COVERAGE_UPDATE:')) return;
+  const el = document.getElementById('robot-log');
+  el.textContent += line + '\n'; el.scrollTop = el.scrollHeight;
+}
+function setRobotStage(stage) {
+  const pnl = { preview: document.getElementById('robot-panel-preview'),
+                confirm: document.getElementById('robot-panel-confirm'),
+                execute: document.getElementById('robot-panel-execute') };
+  const pil = { preview: document.getElementById('stage-pill-preview'),
+                confirm: document.getElementById('stage-pill-confirm'),
+                execute: document.getElementById('stage-pill-execute') };
+  Object.values(pnl).forEach(p => p && (p.style.display='none'));
+  Object.values(pil).forEach(p => p && p.classList.remove('stage-active','stage-done'));
+  if (stage==='idle') {
+    pnl.preview.style.display='block'; pil.preview.classList.add('stage-active');
+    document.getElementById('robot-final-confirm').style.display='none';
+    document.getElementById('face-progress-dots').innerHTML='';
+    const b=document.getElementById('btn-start-preview'); b.disabled=false; b.textContent='▶ START PREVIEW IN RViz';
+  } else if (stage==='previewing') {
+    pnl.confirm.style.display='block'; pil.preview.classList.add('stage-done'); pil.confirm.classList.add('stage-active');
+  } else if (stage==='executing') {
+    pnl.execute.style.display='block'; pil.preview.classList.add('stage-done'); pil.confirm.classList.add('stage-done'); pil.execute.classList.add('stage-active');
+    ['coverage-pct','coverage-stripes','coverage-area'].forEach(id => {
+      const el=document.getElementById(id); if(el) el.textContent = id==='coverage-pct'?'0.0%':id==='coverage-area'?'0 / 0 cm²':'0';
+    });
+    const bar=document.getElementById('coverage-bar'); if(bar){bar.style.width='0%';bar.style.background='var(--green)';}
+  }
+}
+async function startPreview() {
+  const btn=document.getElementById('btn-start-preview');
+  btn.disabled=true; btn.textContent='⏳ Starting…';
+  setRobotStatus('Starting preview…'); appendRobotLog('--- Starting preview ---');
+  try {
+    const res=await fetch('/api/robot/preview',{method:'POST'});
+    const data=await res.json();
+    if(data.status!=='ok'){
+      setRobotStatus('✗ '+(data.message||'error')); appendRobotLog('✗ '+(data.message||'error'));
+      btn.disabled=false; btn.textContent='▶ START PREVIEW IN RViz'; return;
+    }
+    setRobotStage('previewing'); setRobotStatus('Preview running — watch RViz.');
+  } catch(e) {
+    setRobotStatus('✗ '+e.message); appendRobotLog('✗ '+e.message);
+    btn.disabled=false; btn.textContent='▶ START PREVIEW IN RViz';
+  }
+}
+async function sendSignal(signal) {
+  if(signal==='EXECUTE'){setRobotStage('executing');setRobotStatus('Launching RViz…');appendRobotLog('--- Robot executing ---');}
+  else if(signal==='CANCEL'){setRobotStatus('Cancelling…');}
+  try { await fetch('/api/robot/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal})}); }
+  catch(e){appendRobotLog('Signal error: '+e.message);}
+}
+async function stopRobot() {
+  if(!confirm('Stop the robot immediately?'))return;
+  await fetch('/api/robot/stop',{method:'POST'}); setRobotStatus('⚠ Stop requested.');
+}
+function resizeRobotCanvas(){}
 function resizeSelectCanvas() {
   if (!selRenderer) return;
   const wrap = document.getElementById('select-canvas-wrap');
@@ -1320,13 +1863,7 @@ function resizeSelectCanvas() {
   selCamera.updateProjectionMatrix();
 }
 
-function resizeRobotCanvas() {
-  if (!robotRenderer) return;
-  const wrap = document.getElementById('robot-canvas-wrap');
-  robotRenderer.setSize(wrap.clientWidth, wrap.clientHeight);
-  robotCamera.aspect = wrap.clientWidth / wrap.clientHeight;
-  robotCamera.updateProjectionMatrix();
-}
+function resizeRobotCanvas() {}
 
 // ── Settings ───────────────────────────────────────────────────
 function applyConfigToSettings(cfg) {
@@ -1339,6 +1876,7 @@ function applyConfigToSettings(cfg) {
   document.getElementById('s-robot-ip').value         = cfg.robot_ip          || '192.168.0.43';
   document.getElementById('s-clean-path').value       = cfg.clean_stl_path    || '~/scan_clean.stl';
   document.getElementById('s-avoid-path').value       = cfg.avoid_stl_path    || '~/scan_avoid.stl';
+  document.getElementById('s-path-planning-script').value = cfg.path_planning_script || '';
   document.getElementById('info-step').textContent    = (cfg.degrees_per_step || 7.5) + '°';
   if (cfg.rs_laser_power !== undefined) {
     document.getElementById('s-rs-laser').value = cfg.rs_laser_power;
@@ -1363,6 +1901,7 @@ async function saveSettings() {
     robot_ip:          document.getElementById('s-robot-ip').value,
     clean_stl_path:    document.getElementById('s-clean-path').value,
     avoid_stl_path:    document.getElementById('s-avoid-path').value,
+    path_planning_script: document.getElementById('s-path-planning-script').value,
     rs_laser_power:    +document.getElementById('s-rs-laser').value,
     rs_confidence:     +document.getElementById('s-rs-confidence').value,
     rs_depth_units:    +document.getElementById('s-rs-depth-units').value,
@@ -1421,15 +1960,15 @@ function initPreviewViewer(){
   canvas.addEventListener('mousedown',e=>{if(e.button===2)prevRightDrag=true;else prevDragging=true;prevLast={x:e.clientX,y:e.clientY};});
   canvas.addEventListener('contextmenu',e=>e.preventDefault());
   canvas.addEventListener('mouseup',()=>{prevDragging=false;prevRightDrag=false;});
-  canvas.addEventListener('mousemove',e=>{const dx=e.clientX-prevLast.x,dy=e.clientY-prevLast.y;if(prevRightDrag){prevPanX+=dx*0.5;prevPanY-=dy*0.5;}else if(prevDragging){prevRotY+=dx*0.01;prevRotX+=dy*0.01;}prevLast={x:e.clientX,y:e.clientY};});
+  canvas.addEventListener('mousemove',e=>{const dx=e.clientX-prevLast.x,dy=e.clientY-prevLast.y;if(prevRightDrag){prevPanX+=dx*0.5;prevPanY-=dy*0.5;}else if(prevDragging){prevRotZ+=dx*0.01;}prevLast={x:e.clientX,y:e.clientY};});
   canvas.addEventListener('wheel',e=>{prevZoom+=e.deltaY*0.001*prevZoom;prevZoom=Math.max(0.1,Math.min(500,prevZoom));});
   (function animate(){requestAnimationFrame(animate);
-    [previewMeshSurface,previewMeshPrimitive].forEach(m=>{if(m){m.rotation.x=prevRotX;m.rotation.y=prevRotY;}});
+    [previewMeshSurface,previewMeshPrimitive].forEach(m=>{if(m){m.rotation.x=prevRotX;m.rotation.z=prevRotZ;}});
     previewCamera.position.set(prevPanX,prevPanY,prevZoom);previewCamera.lookAt(prevPanX,prevPanY,0);
     previewRenderer.render(previewScene,previewCamera);})();
 }
 function resizePreviewCanvas(){if(!previewRenderer)return;const w=document.getElementById('preview-canvas-wrap');previewRenderer.setSize(w.clientWidth,w.clientHeight);previewCamera.aspect=w.clientWidth/w.clientHeight;previewCamera.updateProjectionMatrix();}
-function resetPreviewCamera(){prevRotX=0.3;prevRotY=0.4;prevZoom=previewMesh?(previewMesh.userData.fitZoom||3):3;prevPanX=0;prevPanY=0;}
+function resetPreviewCamera(){prevRotX=-1.0;prevRotZ=0.4;prevZoom=previewMesh?(previewMesh.userData.fitZoom||3):3;prevPanX=0;prevPanY=0;}
 function togglePreviewWireframe(){previewWireframe=!previewWireframe;document.getElementById('btn-preview-wire').textContent=`⧡ Wireframe: ${previewWireframe?'ON':'OFF'}`;if(previewMeshSurface)previewMeshSurface.material.wireframe=previewWireframe;}
 async function loadSTLPreview(){
   const fn=document.getElementById('preview-filename').value.trim(),label=document.getElementById('preview-label').value;
@@ -1555,7 +2094,6 @@ async function exportBothAndPreview(){
     document.getElementById('preview-info').textContent=
       `Surface: ${Math.round(tc).toLocaleString()} tris\nPrimitive (${primitive}): ${Math.round(tp)} tris\nSize: ${sz.x.toFixed(1)} × ${sz.y.toFixed(1)} × ${sz.z.toFixed(1)} mm\n\n🔴 red = surface  🟢 green = primitive`;
     statusEl.textContent='✔ Both loaded → switch to ④ STL PREVIEW';
-    updateSceneObjects();
     // Auto-switch to preview tab
     switchTab('preview');
   }catch(e){
@@ -1566,8 +2104,10 @@ async function exportBothAndPreview(){
 
 window.addEventListener('load', () => {
   initPointcloudViewer();
+  initMeshViewer();
   initSelectViewer();
-  initRobotViewer();
+  initInsetViewer();
+  initRobotControls();
   initPreviewViewer();
   socket.emit('request_pointcloud');
 });
