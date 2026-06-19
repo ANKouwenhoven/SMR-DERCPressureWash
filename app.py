@@ -457,6 +457,103 @@ def pcd_to_json(pcd):
     return {"points": pts, "colors": cols}
 
 
+def _open_boundary_edge_count(mesh):
+    """
+    Count edges that belong to only one triangle — i.e. an actual hole
+    boundary, as opposed to a normal interior edge (shared by 2 triangles)
+    or a non-manifold edge (shared by 3+). A fully closed/watertight mesh
+    has zero of these. Used as a diagnostic at each pipeline stage so we
+    can see exactly which step opens a hole and whether a later step
+    actually closes it, instead of inferring it from a screenshot.
+    """
+    tris = np.asarray(mesh.triangles)
+    if len(tris) == 0:
+        return 0
+    edges = np.vstack([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
+    edges = np.sort(edges, axis=1)
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    return int(np.sum(counts == 1))
+
+
+def _drop_invalid_vertices(mesh, max_extent_m=5.0):
+    """
+    Defensive cleanup: remove any vertex with a non-finite (NaN/Inf)
+    coordinate, or one so large it's obviously corrupted rather than real
+    geometry, along with whatever triangles reference it.
+
+    simplify_quadric_decimation occasionally hits a poorly-conditioned
+    region (e.g. sliver triangles left over from aggressive cropping) and
+    solves a near-singular system for the optimal collapse point, landing
+    a vertex somewhere absurd. One such vertex is enough to make any
+    boundary loop touching it look astronomically large to fill_holes,
+    which then correctly (by design) refuses to touch what looks like a
+    giant hole — so the corruption silently defeats hole-filling too.
+    max_extent_m is in the mesh's current units (metres, pre mm-scaling);
+    5 m comfortably covers anything realistic on this turntable setup.
+    """
+    verts = np.asarray(mesh.vertices)
+    if len(verts) == 0:
+        return mesh
+    bad = ~np.all(np.isfinite(verts), axis=1) | (np.abs(verts).max(axis=1) > max_extent_m)
+    n_bad = int(np.sum(bad))
+    if n_bad:
+        mesh.remove_vertices_by_mask(bad)
+        mesh.remove_unreferenced_vertices()
+        print(f"[STL] Removed {n_bad} vertices with invalid/out-of-range coordinates")
+    return mesh
+
+
+def _boundary_loop_sizes(mesh):
+    """
+    Group open boundary edges into connected loops (one loop per distinct
+    hole) and report each loop's bounding diameter, in the mesh's current
+    units (metres, pre mm-scaling). Lets us see exactly how big each gap
+    actually is before fill_holes runs, instead of guessing a hole_size
+    threshold and finding out indirectly from a screenshot whether it was
+    too big (capping real features) or too small (missing artefacts).
+    """
+    tris = np.asarray(mesh.triangles)
+    verts = np.asarray(mesh.vertices)
+    if len(tris) == 0:
+        return []
+    edges = np.vstack([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
+    edges_sorted = np.sort(edges, axis=1)
+    uniq, counts = np.unique(edges_sorted, axis=0, return_counts=True)
+    boundary_edges = uniq[counts == 1]
+    if len(boundary_edges) == 0:
+        return []
+
+    # Union-find to group boundary edges into loops by shared vertices.
+    parent = {}
+    def find(x):
+        root = x
+        while parent.get(root, root) != root:
+            root = parent[root]
+        while parent.get(x, x) != root:
+            parent[x], x = root, parent.get(x, x)
+        return root
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for a, b in boundary_edges:
+        parent.setdefault(int(a), int(a))
+        parent.setdefault(int(b), int(b))
+        union(int(a), int(b))
+
+    groups = {}
+    for v in parent:
+        groups.setdefault(find(v), []).append(v)
+
+    sizes = []
+    for vidx_list in groups.values():
+        pts = verts[vidx_list]
+        diam = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+        sizes.append(diam)
+    return sorted(sizes)
+
+
 def make_stl_from_pcd(pcd, label="clean", output_path=None):
     """
     Convert a point cloud to an STL for robot path planning.
@@ -468,6 +565,7 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
       5. Largest connected component — drop disconnected blobs
       6. Convex hull crop (10 mm tolerance) — remove hallucinated caps/skirts
       7. Smooth (Taubin 50) + decimate + clean
+      7b. Patch small artefact holes left by cropping/cleanup
       8. 7 mm outward offset + final smooth (Taubin 15)
       9. Scale to mm and write STL
     """
@@ -494,12 +592,14 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
         # ── 3. Poisson reconstruction ──────────────────────────
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
             pcd_down, depth=9, width=0, scale=1.1, linear_fit=False)
-        print(f"[STL] Poisson raw: {len(mesh.triangles)} triangles")
+        print(f"[STL] Poisson raw: {len(mesh.triangles)} triangles, "
+              f"{_open_boundary_edge_count(mesh)} open boundary edges")
 
         # ── 4. Density trim (floaters only) ───────────────────
         dens = np.asarray(densities)
         mesh.remove_vertices_by_mask(dens < np.percentile(dens, 1))
-        print(f"[STL] After density trim: {len(mesh.triangles)} triangles")
+        print(f"[STL] After density trim: {len(mesh.triangles)} triangles, "
+              f"{_open_boundary_edge_count(mesh)} open boundary edges")
 
         # ── 5. Largest connected component ────────────────────
         # Drops disconnected blobs (noisy point clusters Poisson
@@ -510,7 +610,8 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
         largest         = cluster_n_tris.argmax()
         mesh.remove_triangles_by_mask(tri_clusters != largest)
         mesh.remove_unreferenced_vertices()
-        print(f"[STL] After component filter: {len(mesh.triangles)} triangles")
+        print(f"[STL] After component filter: {len(mesh.triangles)} triangles, "
+              f"{_open_boundary_edge_count(mesh)} open boundary edges")
         if len(mesh.triangles) == 0:
             print("[STL] Empty mesh after component filter — aborting")
             return None
@@ -520,14 +621,28 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
         # extent (hallucinated caps, skirts, side blobs).
         # 10 mm tolerance is generous enough to keep legitimate surface
         # vertices on thin objects while still catching hallucinated fill.
-        hull, _ = pcd_down.compute_convex_hull()
+        #
+        # IMPORTANT: the hull is built from a freshly, lightly downsampled
+        # copy of the ORIGINAL cloud — not pcd_down. pcd_down has already
+        # been through remove_statistical_outlier(), which is tuned to
+        # clean Poisson's input but can't tell "isolated noise point" apart
+        # from "real point in a sparsely-covered concave corner / grazing
+        # angle". When those legitimate points get dropped, the hull
+        # shrinks exactly there, and the crop below then deletes correctly
+        # -reconstructed surface in that spot, opening a hole. Using the
+        # un-filtered (only voxel-downsampled) cloud keeps the hull at the
+        # true scan extent; the 20 mm tolerance already added below easily
+        # absorbs the handful of stray points this lets through.
+        pcd_for_hull = pcd.voxel_down_sample(voxel_size=0.004)
+        hull, _ = pcd_for_hull.compute_convex_hull()
         hull_scene = o3d.t.geometry.RaycastingScene()
         hull_scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(hull))
         verts = np.asarray(mesh.vertices).astype(np.float32)
         query = o3d.core.Tensor(verts, dtype=o3d.core.Dtype.Float32)
         signed_dist = hull_scene.compute_signed_distance(query).numpy()
         mesh.remove_vertices_by_mask(signed_dist > 0.020)
-        print(f"[STL] After hull crop: {len(mesh.triangles)} triangles")
+        print(f"[STL] After hull crop: {len(mesh.triangles)} triangles, "
+              f"{_open_boundary_edge_count(mesh)} open boundary edges")
         if len(mesh.triangles) == 0:
             print("[STL] Empty mesh after hull crop — aborting")
             return None
@@ -539,10 +654,41 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
         if n_tris > 10_000:
             mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=10_000)
             print(f"[STL] Decimated {n_tris} -> {len(mesh.triangles)} triangles")
+        mesh = _drop_invalid_vertices(mesh)
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_triangles()
         mesh.remove_duplicated_vertices()
         mesh.remove_non_manifold_edges()
+        print(f"[STL] After clean: {len(mesh.triangles)} triangles, "
+              f"{_open_boundary_edge_count(mesh)} open boundary edges")
+
+        # ── 7b. Patch artefact holes ────────────────────────────
+        # Everything from step 4 onward has only ever removed geometry —
+        # the component filter, the hull crop, and remove_non_manifold_edges
+        # (which deletes triangles to resolve bad edges) all leave whatever
+        # boundary they create right where it is. This closes those gaps.
+        #
+        # hole_size dropped further (20mm -> 10mm): even the 20mm pass was
+        # still capping real round cutouts and producing sliver-triangle
+        # artefacts on elongated/non-planar boundary loops (naive boundary
+        # triangulation fans a long thin triangle straight across a loop
+        # that isn't a nice simple shape). The loop-diameter print below
+        # shows the real size of every gap before any filling happens, so
+        # the next threshold choice can be based on actual numbers instead
+        # of another guess.
+        print(f"[STL] boundary loop diameters (m) before hole fill: "
+              f"{[round(s, 4) for s in _boundary_loop_sizes(mesh)]}")
+        try:
+            mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+            mesh_t = mesh_t.fill_holes(hole_size=0.01)
+            mesh = mesh_t.to_legacy()
+            mesh.remove_degenerate_triangles()
+            mesh.remove_duplicated_vertices()
+            open_edges = _open_boundary_edge_count(mesh)
+            print(f"[STL] After hole fill (10mm pass): {len(mesh.triangles)} triangles, "
+                  f"{open_edges} open boundary edges")
+        except Exception as fill_err:
+            print(f"[WARN] Hole fill failed, continuing without it: {fill_err}")
 
         # ── 8. Outward offset + final smooth ──────────────────
         # Offset applied AFTER hull crop so offset geometry is not
@@ -555,9 +701,11 @@ def make_stl_from_pcd(pcd, label="clean", output_path=None):
         mesh = mesh.filter_smooth_taubin(number_of_iterations=15)
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_vertices()
-        print(f"[STL] Applied 7 mm outward offset")
+        print(f"[STL] Applied 7 mm outward offset, {len(mesh.triangles)} triangles, "
+              f"{_open_boundary_edge_count(mesh)} open boundary edges")
 
         # ── 9. Scale to mm, write STL ──────────────────────────
+        mesh = _drop_invalid_vertices(mesh)
         mesh.scale(1000, center=(0, 0, 0))
         mesh.compute_vertex_normals()
         if output_path is None:
@@ -728,11 +876,20 @@ def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hul
             # ── 3. Poisson reconstruction ──────────────────────────
             mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
                 pcd_lp, depth=8, width=0, scale=1.1, linear_fit=False)
-            print(f"[STL] lowpoly Poisson raw: {len(mesh.triangles)} triangles")
+            print(f"[STL] lowpoly Poisson raw: {len(mesh.triangles)} triangles, "
+                  f"{_open_boundary_edge_count(mesh)} open boundary edges")
 
             # ── 4. Density trim ────────────────────────────────────
+            # Was percentile=25, which trims the lowest QUARTER of density
+            # values mesh-wide. That's not just "floaters" — it's also
+            # exactly the legitimately-real-but-sparsely-supported surface
+            # in concave corners / grazing-angle faces, which is what was
+            # carving large chunks out of the lowpoly mesh. Dropped to 2,
+            # matching the conservative trim used elsewhere in this file.
             dens = np.asarray(densities)
-            mesh.remove_vertices_by_mask(dens < np.percentile(dens, 25))
+            mesh.remove_vertices_by_mask(dens < np.percentile(dens, 2))
+            print(f"[STL] lowpoly after density trim: {len(mesh.triangles)} triangles, "
+                  f"{_open_boundary_edge_count(mesh)} open boundary edges")
 
             # ── 5. Largest connected component ─────────────────────
             tri_clusters, cluster_n_tris, _ = mesh.cluster_connected_triangles()
@@ -740,18 +897,30 @@ def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hul
             cluster_n_tris = np.asarray(cluster_n_tris)
             mesh.remove_triangles_by_mask(tri_clusters != cluster_n_tris.argmax())
             mesh.remove_unreferenced_vertices()
+            print(f"[STL] lowpoly after component filter: {len(mesh.triangles)} triangles, "
+                  f"{_open_boundary_edge_count(mesh)} open boundary edges")
             if len(mesh.triangles) == 0:
                 print("[STL] lowpoly: empty after component filter")
                 return None
 
             # ── 6. Convex hull crop ────────────────────────────────
-            hull, _ = pcd_lp.compute_convex_hull()
+            # Same fix as make_stl_from_pcd: build the hull from a freshly,
+            # lightly downsampled copy of the RAW cloud, not pcd_lp. pcd_lp
+            # descends from pcd_clean, which has already been through
+            # remove_statistical_outlier() — that filter can't distinguish
+            # a noise point from a real point in a sparsely-covered corner,
+            # so cropping against a hull built from it shrinks the hull
+            # exactly in those spots and deletes real surface there.
+            pcd_for_hull = pcd.voxel_down_sample(voxel_size=0.004)
+            hull, _ = pcd_for_hull.compute_convex_hull()
             hull_scene = o3d.t.geometry.RaycastingScene()
             hull_scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(hull))
             verts = np.asarray(mesh.vertices).astype(np.float32)
             signed_dist = hull_scene.compute_signed_distance(
                 o3d.core.Tensor(verts, dtype=o3d.core.Dtype.Float32)).numpy()
             mesh.remove_vertices_by_mask(signed_dist > 0.020)
+            print(f"[STL] lowpoly after hull crop: {len(mesh.triangles)} triangles, "
+                  f"{_open_boundary_edge_count(mesh)} open boundary edges")
             if len(mesh.triangles) == 0:
                 print("[STL] lowpoly: empty after hull crop")
                 return None
@@ -761,10 +930,32 @@ def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hul
             if len(mesh.triangles) > lowpoly_tris:
                 mesh = mesh.simplify_quadric_decimation(
                     target_number_of_triangles=lowpoly_tris)
+            mesh = _drop_invalid_vertices(mesh)
             mesh.remove_degenerate_triangles()
             mesh.remove_duplicated_vertices()
             mesh.remove_non_manifold_edges()
-            print(f"[STL] lowpoly: {len(mesh.triangles)} tris (target {lowpoly_tris})")
+            print(f"[STL] lowpoly: {len(mesh.triangles)} tris (target {lowpoly_tris}), "
+                  f"{_open_boundary_edge_count(mesh)} open boundary edges")
+
+            # ── 7b. Patch artefact holes ────────────────────────────
+            # hole_size dropped further (20mm -> 10mm): even 20mm was still
+            # capping the real round cutouts and leaving sliver-triangle
+            # artefacts on elongated/non-planar boundary loops. The loop-
+            # diameter print below shows the real size of every gap before
+            # filling, so we're tuning from actual numbers, not a guess.
+            print(f"[STL] lowpoly boundary loop diameters (m) before hole fill: "
+                  f"{[round(s, 4) for s in _boundary_loop_sizes(mesh)]}")
+            try:
+                mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+                mesh_t = mesh_t.fill_holes(hole_size=0.01)
+                mesh = mesh_t.to_legacy()
+                mesh.remove_degenerate_triangles()
+                mesh.remove_duplicated_vertices()
+                open_edges = _open_boundary_edge_count(mesh)
+                print(f"[STL] lowpoly after hole fill (10mm pass): {len(mesh.triangles)} triangles, "
+                      f"{open_edges} open boundary edges")
+            except Exception as fill_err:
+                print(f"[WARN] lowpoly hole fill failed, continuing without it: {fill_err}")
 
             # ── 8. Normal smoothing ────────────────────────────────
             # Recompute normals with a large search radius so flat faces
@@ -813,6 +1004,7 @@ def fit_primitive_stl(pcd, primitive="box", label="clean", output_path=None, hul
             # ── 9. Standoff offset ─────────────────────────────────
             verts = np.asarray(mesh.vertices)
             mesh.vertices = o3d.utility.Vector3dVector(verts + smooth2 * 0.002)
+            mesh = _drop_invalid_vertices(mesh)
 
             # save_mm=False from api_mesh_build; browser x1000 gives mm display
             if save_mm:
@@ -1330,72 +1522,6 @@ def api_mesh_download():
         return jsonify({'status': 'error', 'message': 'File not found'}), 404
     return send_file(path, mimetype='application/octet-stream',
                      as_attachment=False, download_name=os.path.basename(path))
-
-
-@app.route('/api/mesh/upload', methods=['POST'])
-def api_mesh_upload():
-    """
-    Load a user-supplied STL directly into the MESH step, bypassing the
-    scan + point-cloud fitting. Lets the SELECT FACES / ROBOT CONTROL
-    steps be exercised against a known test STL while no scan is available
-    (e.g. testing path planning while a teammate works on the scanner).
-
-    Mirrors the response shape of /api/mesh/build so the frontend can reuse
-    the same downstream handling.
-    """
-    o3d = get_open3d()
-    if o3d is None:
-        return jsonify({'status': 'error', 'message': 'Open3D not available'})
-
-    f = request.files.get('stl_file')
-    if not f or not f.filename:
-        return jsonify({'status': 'error', 'message': 'No file uploaded'})
-
-    units    = request.form.get('units', 'mm')
-    filename = request.form.get('filename', '').strip()
-
-    safe_name = ("".join(c for c in os.path.splitext(filename)[0]
-                         if c.isalnum() or c in '-_ ').strip() or 'scan') if filename else 'scan'
-    os.makedirs(GENERATED_MODELS_DIR, exist_ok=True)
-
-    # Open3D needs a real file path to read from
-    tmp_path = os.path.join(GENERATED_MODELS_DIR, f'_upload_tmp_{int(time.time())}.stl')
-    f.save(tmp_path)
-
-    try:
-        mesh = o3d.io.read_triangle_mesh(tmp_path)
-        if len(mesh.triangles) == 0:
-            return jsonify({'status': 'error', 'message': 'STL has no triangles — check the file'})
-
-        if units == 'mm':
-            # Internal pipeline (mesh viewer, mesh/split) works in metres
-            mesh.scale(0.001, center=(0, 0, 0))
-
-        mesh.compute_vertex_normals()
-
-        out_path = os.path.join(GENERATED_MODELS_DIR, f'{safe_name}_uploaded.stl')
-        o3d.io.write_triangle_mesh(out_path, mesh)
-        tri_count = len(mesh.triangles)
-        print(f"[MESH] Uploaded STL -> {out_path}  ({tri_count} triangles, units={units})")
-
-        state['built_mesh_path'] = out_path
-        state['primitive_stl']   = out_path
-        CONFIG['clean_stl_path'] = out_path
-
-        return jsonify({
-            'status':       'ok',
-            'stl_path':     out_path,
-            'download_url': f'/api/mesh/download?path={out_path}',
-            'tri_count':    tri_count,
-        })
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'status': 'error', 'message': str(e)})
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
 
 
 @app.route('/api/mesh/split', methods=['POST'])
