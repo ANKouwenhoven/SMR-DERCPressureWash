@@ -1,8 +1,8 @@
 #define PULSE_PIN  9
 #define DIR_PIN    8
-#define MICROSTEPS 10
+#define MICROSTEPS 10.00
 #define DIRECTION  HIGH
-#define STEPS_PER_REV (194 * MICROSTEPS)
+#define STEPS_PER_REV (199.4 * MICROSTEPS)
 #define STEPS_PER_SHOT (STEPS_PER_REV / 35)
 #define DEFAULT_RPM 3
 #define GEAR_RATIO 16
@@ -60,7 +60,7 @@ void handleCommand(String cmd) {
     }
   } else if (cmd.startsWith("DEG:")) {                          // NEW
     float degrees = cmd.substring(4).toFloat();                 //
-    if (degrees > 0 && degrees <= 360) {                        //
+    if (degrees > 0 && degrees <= 1080) {                        //
       long steps = (long)((degrees / 360.0) * STEPS_PER_REV);  //
       if (steps < 3) {                                          //
         Serial.println("!! Too few steps for ramp — increase degrees");
