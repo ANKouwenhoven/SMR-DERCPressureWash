@@ -1,0 +1,2340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Scanner — UR10 Cleaning System</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  :root {
+    --bg:       #0d1117;
+    --panel:    #161b22;
+    --border:   #30363d;
+    --accent:   #ff9b00;
+    --blue:     #58a6ff;
+    --green:    #3fb950;
+    --red:      #ff3333;
+    --yellow:   #d29922;
+    --text:     #c9d1d9;
+    --muted:    #8b949e;
+    --clean:    #4488ff;
+    --avoid:    #ff4444;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  header h1 { color: var(--accent); font-size: 15px; letter-spacing: 2px; }
+  .status-bar { display: flex; gap: 16px; align-items: center; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+  .dot-green  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-red    { background: var(--red); box-shadow: 0 0 6px var(--red);}
+  .dot-yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow);}
+
+  /* ── Tabs ── */
+  .tabs {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-shrink: 0;
+  }
+  .tab {
+    padding: 10px 24px;
+    cursor: pointer;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    letter-spacing: 1px;
+  }
+  .tab:hover  { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* ── Tab content ── */
+  .tab-content { display: none; flex: 1; overflow: hidden; }
+  .tab-content.active { display: flex; }
+
+  /* ── Panels ── */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .panel-title {
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    margin-bottom: 4px;
+  }
+
+  /* ── Buttons ── */
+  .btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    transition: all 0.2s;
+    width: 100%;
+  }
+  .btn-primary   { background: var(--accent); color: white; }
+  .btn-primary:hover { background: #f3b15b; }
+  .btn-secondary { background: #21262d; color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--blue); color: var(--blue); }
+  .btn-success   { background: #1a4731; color: var(--green); border: 1px solid var(--green); }
+  .btn-success:hover { background: var(--green); color: #000; }
+  .btn:disabled  { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Canvas containers ── */
+  .video-box {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    min-height: 0;
+  }
+  .video-box img, .video-box canvas { max-width: 100%; max-height: 100%; }
+
+  /* ════════════════════════════════
+     TAB 1 — SCAN
+  ════════════════════════════════ */
+  #tab-scan {
+    padding: 10px;
+    gap: 10px;
+  }
+  .scan-grid {
+    display: grid;
+    grid-template-columns: 200px 1fr 1fr 1fr;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+  }
+  .scan-controls { display: flex; flex-direction: column; gap: 8px; }
+  #angle-display {
+    font-size: 24px;
+    color: var(--accent);
+    text-align: center;
+    padding: 8px 0;
+  }
+  .progress-bar-wrap {
+    background: #21262d;
+    border-radius: 4px;
+    height: 8px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s;
+    width: 0%;
+  }
+  #scan-status {
+    color: var(--muted);
+    font-size: 11px;
+    text-align: center;
+    min-height: 40px;
+    white-space: pre-line;
+  }
+  #arduino-status {
+    font-size: 11px;
+    text-align: center;
+    padding: 4px;
+    border-radius: 4px;
+  }
+
+  /* ════════════════════════════════
+     TAB 3 — SELECT FACES
+  ════════════════════════════════ */
+  #tab-select {
+    padding: 10px;
+    gap: 10px;
+  }
+  .select-grid {
+    display: grid;
+    grid-template-columns: 1fr 200px;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+  }
+  #select-canvas-wrap {
+    position: relative;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  #select-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+  #inset-canvas {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    width: 200px;
+    height: 200px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #0a0f1a;
+    pointer-events: none;
+  }
+  #mesh-pcd-inset {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    width: 200px;
+    height: 200px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #0a0f1a;
+    pointer-events: none;
+  }
+  .brush-controls { display: flex; flex-direction: column; gap: 10px; }
+  .brush-btn {
+    padding: 10px;
+    border-radius: 4px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    width: 100%;
+    transition: all 0.2s;
+  }
+  .brush-clean { background: rgba(68,136,255,0.15); color: var(--clean); border-color: var(--clean); }
+  .brush-avoid { background: rgba(255,68,68,0.15); color: var(--avoid); border-color: var(--avoid); }
+  .brush-erase { background: #21262d; color: var(--muted); border-color: var(--border); }
+  .brush-btn.active { opacity: 1; }
+  .brush-btn:not(.active) { opacity: 0.5; }
+  .slider-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .slider-wrap label { color: var(--muted); font-size: 11px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .legend { display: flex; flex-direction: column; gap: 4px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .paint-hint {
+    font-size: 10px;
+    color: var(--yellow);
+    text-align: center;
+    padding: 4px;
+    border: 1px solid var(--yellow);
+    border-radius: 4px;
+  }
+
+  /* ════════════════════════════════
+     TAB 4 — ROBOT
+  ════════════════════════════════ */
+  .stage-pill { background:#21262d;border:1px solid var(--border);border-radius:12px;padding:2px 10px;color:var(--muted);transition:background .3s,color .3s,border-color .3s; }
+  .stage-active { background:var(--yellow);color:#000;border-color:var(--yellow);font-weight:bold; }
+  .stage-done   { background:#1a3a1a;color:var(--green);border-color:var(--green); }
+  #tab-robot { padding: 20px; overflow-y: auto; }
+  .robot-grid {
+    display: grid;
+    grid-template-columns: 1fr 200px;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+  }
+  #robot-canvas-wrap {
+    background: #000813;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  #robot-canvas-wrap canvas { display: block; }
+  .robot-controls { display: flex; flex-direction: column; gap: 8px; }
+  .moveit-status {
+    padding: 8px;
+    border-radius: 4px;
+    background: #21262d;
+    font-size: 11px;
+    color: var(--muted);
+    min-height: 60px;
+    white-space: pre-line;
+  }
+
+  /* ════════════════════════════════
+     TAB 5 — SETTINGS
+  ════════════════════════════════ */
+  #tab-settings {
+    padding: 20px;
+    overflow-y: auto;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    max-width: 900px;
+  }
+  .setting-group { display: flex; flex-direction: column; gap: 12px; }
+  .setting-row { display: flex; flex-direction: column; gap: 4px; }
+  .setting-row label { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+  .setting-row input, .setting-row select {
+    background: #21262d;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    width: 100%;
+  }
+  .setting-row input:focus, .setting-row select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .setting-hint { color: var(--muted); font-size: 10px; margin-top: 2px; }
+  .settings-actions { display: flex; gap: 10px; max-width: 400px; margin-top: 10px; }
+  .save-msg { color: var(--green); font-size: 12px; display: none; align-items: center; }
+
+  /* ── Cleaning-complete celebration modal ── */
+  #celebrate-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  #celebrate-card {
+    background: var(--panel);
+    border: 1px solid var(--green);
+    box-shadow: 0 0 30px rgba(63,185,80,0.35);
+    border-radius: 10px;
+    padding: 32px 40px;
+    text-align: center;
+    max-width: 360px;
+    animation: celebrate-pop 0.35s ease;
+  }
+  @keyframes celebrate-pop {
+    0%   { transform: scale(0.85); opacity: 0; }
+    100% { transform: scale(1);    opacity: 1; }
+  }
+  #celebrate-card .emoji { font-size: 40px; margin-bottom: 8px; }
+  #celebrate-card h2 { color: var(--green); font-size: 16px; letter-spacing: 1px; margin-bottom: 10px; }
+  #celebrate-card p { color: var(--text); font-size: 12px; line-height: 1.6; margin-bottom: 18px; }
+
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header>
+  <h1>◈ 3D SCANNER — UR10 CLEANING SYSTEM</h1>
+  <div class="status-bar">
+    <span><span class="status-dot dot-red" id="dot-camera"></span>Camera</span>
+    <span><span class="status-dot dot-red" id="dot-scan"></span>Scanning</span>
+    <span><span class="status-dot dot-red" id="dot-ros"></span>ROS2</span>
+    <span><span class="status-dot dot-red" id="dot-arduino"></span>Arduino</span>
+    <span id="header-angle" style="color:var(--muted)">0.0° / 360°</span>
+  </div>
+  <button class="btn btn-secondary" onclick="newObjectScan()"
+          title="Clears the current mesh/painted faces and takes you back to ① SCAN to start a new object"
+          style="width:auto;padding:6px 14px;font-size:11px">
+    🆕 NEW OBJECT SCAN
+  </button>
+</header>
+
+<!-- ── Tabs ── -->
+<div class="tabs">
+  <div class="tab active" id="navtab-scan" data-label="① SCAN" onclick="switchTab('scan')">① SCAN</div>
+  <div class="tab" id="navtab-mesh" data-label="② MESH" onclick="switchTab('mesh')">② MESH</div>
+  <div class="tab" id="navtab-select" data-label="③ SELECT FACES" onclick="switchTab('select')">③ SELECT FACES</div>
+  <div class="tab" onclick="switchTab('robot')">④ ROBOT</div>
+  <div class="tab" onclick="switchTab('settings')">⚙ SETTINGS</div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 1 — SCAN
+════════════════════════════════ -->
+<div id="tab-scan" class="tab-content active">
+  <div class="scan-grid">
+
+    <!-- Controls -->
+    <div class="panel scan-controls">
+      <div class="panel-title">Controls</div>
+      <div id="angle-display">0.0°</div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="progress-fill"></div>
+      </div>
+      <div id="scan-status">Ready to scan</div>
+
+      <div id="arduino-status" style="background:#1a2a1a;color:var(--muted);border:1px solid var(--border)">
+        Arduino: checking...
+      </div>
+
+      <button class="btn btn-primary" id="btn-start-scan" onclick="startScan()">▶ START SCAN</button>
+
+      <!-- Manual button — hidden when Arduino enabled -->
+      <button class="btn btn-secondary" id="btn-capture" onclick="captureFrame()"
+              disabled style="display:none">
+        📸 TABLE ROTATED<br>TAKE PHOTO
+      </button>
+
+      <button class="btn btn-secondary" id="btn-stop-scan" onclick="stopScan()" disabled>
+        ■ STOP SCAN
+      </button>
+
+      <button class="btn btn-primary" id="btn-scan-next" onclick="goToMeshAfterScan()" style="display:none">
+        ▶ NEXT: BUILD MESH →
+      </button>
+
+      <label style="display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;cursor:pointer">
+        <input type="checkbox" id="chk-live-pcd" checked onchange="setLivePcdUpdate(this.checked)">
+        Live pointcloud update
+      </label>
+
+      <hr style="border-color:var(--border)">
+      <div class="panel-title">Info</div>
+      <div style="color:var(--muted);font-size:11px">
+        Step: <span id="info-step" style="color:var(--text)">7.5°</span><br>
+        Photos: <span id="info-photos" style="color:var(--text)">0 / 48</span><br>
+        Points: <span id="info-points" style="color:var(--text)">0</span>
+      </div>
+    </div>
+
+    <!-- Live camera -->
+    <div class="panel" style="min-height:0">
+      <div class="panel-title">Live Camera Feed</div>
+      <div class="video-box">
+        <img id="camera-img" src="" alt="Camera feed" style="display:none">
+        <div id="camera-placeholder" style="color:var(--muted)">Starting camera...</div>
+      </div>
+    </div>
+
+    <!-- Last snapshot -->
+    <div class="panel" style="min-height:0">
+      <div class="panel-title">Last Snapshot</div>
+      <div class="video-box">
+        <img id="snapshot-img" src="" alt="Snapshot" style="display:none">
+        <div id="snapshot-placeholder" style="color:var(--muted)">No snapshot yet</div>
+      </div>
+      <div id="snapshot-angle" style="color:var(--muted);font-size:11px;text-align:center"></div>
+    </div>
+
+    <!-- Pointcloud -->
+    <div class="panel" style="min-height:0">
+      <div class="panel-title">Pointcloud (Live)</div>
+      <div class="video-box" id="pcd-box">
+        <canvas id="pcd-canvas"></canvas>
+      </div>
+      <div style="color:var(--muted);font-size:10px;text-align:center">
+        Drag to rotate · Scroll to zoom
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 2 — MESH
+════════════════════════════════ -->
+<div id="tab-mesh" class="tab-content">
+  <div style="display:grid;grid-template-columns:1fr 220px;gap:10px;flex:1;min-height:0;padding:10px">
+
+    <div style="background:#000813;border:1px solid var(--border);border-radius:4px;position:relative;overflow:hidden">
+      <canvas id="mesh-canvas" style="display:block;width:100%;height:100%"></canvas>
+      <div style="position:absolute;top:8px;left:8px;color:var(--muted);font-size:10px">
+        Drag to rotate · Scroll to zoom
+      </div>
+      <canvas id="mesh-pcd-inset"></canvas>
+    </div>
+
+    <div class="panel" style="display:flex;flex-direction:column;gap:8px;overflow-y:auto;padding:12px">
+      <div class="panel-title">② MESH</div>
+
+      <div class="moveit-status" id="mesh-status" style="margin:0">
+        Complete a scan, then build a mesh.
+      </div>
+
+      <!-- DEBUG: mesh type controls — hidden unless debug checkbox is on -->
+      <div id="debug-mesh-controls" style="display:none;flex-direction:column;gap:8px">
+        <label style="color:var(--yellow);font-size:10px">&#9881; MESH TYPE (debug)</label>
+        <select id="mesh-primitive-type"
+                style="width:100%;background:#21262d;color:var(--text);border:1px solid var(--border);
+                       padding:5px 4px;font-family:inherit;font-size:11px;border-radius:4px"
+                onchange="document.getElementById('mesh-hull-wrap').style.display=this.value==='hull'?'flex':'none';
+                          document.getElementById('mesh-lowpoly-wrap').style.display=this.value==='lowpoly'?'flex':'none'">
+          <option value="lowpoly" selected>Low-poly Surface</option>
+          <option value="hull">Convex Hull</option>
+          <option value="box">Box</option>
+          <option value="cylinder">Cylinder</option>
+          <option value="sphere">Sphere</option>
+        </select>
+
+        <div id="mesh-hull-wrap" style="display:none;flex-direction:column;gap:2px">
+          <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:10px">
+            <span>Coarse</span><span>Detail: <span id="mesh-hull-val">50</span></span><span>Fine</span>
+          </div>
+          <input type="range" id="mesh-hull-detail" min="0" max="100" value="50" style="width:100%;margin:0"
+                 oninput="document.getElementById('mesh-hull-val').textContent=this.value">
+        </div>
+
+        <div id="mesh-lowpoly-wrap" style="display:flex;flex-direction:column;gap:2px">
+          <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:10px">
+            <span>Fewer</span><span>Tris: <span id="mesh-lowpoly-val">5000</span></span><span>More</span>
+          </div>
+          <input type="range" id="mesh-lowpoly-tris" min="50" max="5000" value="5000" step="50"
+                 style="width:100%;margin:0"
+                 oninput="document.getElementById('mesh-lowpoly-val').textContent=this.value">
+        </div>
+      </div>
+
+      <button class="btn" id="btn-build-mesh" onclick="buildMesh()"
+              style="background:var(--accent);color:#fff">
+        ⬡ BUILD MESH
+      </button>
+
+      <hr style="border-color:var(--border);margin:4px 0">
+      <input type="file" id="mesh-upload-file" accept=".stl" style="display:none"
+             onchange="document.getElementById('mesh-upload-name').textContent=this.files[0]?this.files[0].name:'No file chosen'">
+      <button class="btn btn-secondary" onclick="document.getElementById('mesh-upload-file').click()" style="font-size:11px">
+        📁 CHOOSE STL…
+      </button>
+      <div id="mesh-upload-name" style="color:var(--muted);font-size:10px;text-align:center">No file chosen</div>
+      <select id="mesh-upload-units" style="width:100%;background:#21262d;color:var(--text);border:1px solid var(--border);
+              padding:4px;font-family:inherit;font-size:10px;border-radius:4px">
+        <option value="mm" selected>STL units: millimetres</option>
+        <option value="m">STL units: metres</option>
+      </select>
+      <button class="btn" id="btn-upload-mesh" onclick="uploadMeshSTL()" style="background:#5a3d99;color:#fff">
+        ⬆ LOAD STL
+      </button>
+
+      <div style="color:var(--muted);font-size:10px;margin-top:4px" id="mesh-info"></div>
+
+      <hr style="border-color:var(--border);margin:4px 0">
+      <button class="btn" id="btn-mesh-proceed" onclick="switchTab('select')" disabled
+              title="Build a mesh or load an STL above first"
+              style="background:#1a3a2a;color:var(--text);border:1px solid var(--green)">
+        ▶ SELECT FACES →
+      </button>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 3 — SELECT FACES
+════════════════════════════════ -->
+<div id="tab-select" class="tab-content">
+  <div class="select-grid">
+
+    <div id="select-canvas-wrap">
+      <canvas id="select-canvas"></canvas>
+      <canvas id="inset-canvas"></canvas>
+    </div>
+
+    <div class="panel brush-controls" style="overflow-y:auto">
+      <div class="panel-title">③ SELECT FACES</div>
+
+      <div class="moveit-status" id="select-status" style="margin:0;font-size:10px">
+        Build a mesh first (② MESH), then paint faces here.
+      </div>
+
+      <label style="color:var(--muted);font-size:10px">PAINT ZONES</label>
+      <button class="brush-btn brush-clean active" id="btn-brush-clean"
+              onclick="setBrush('clean')" style="padding:5px 8px">
+        🔵 CLEAN ZONE
+      </button>
+      <button class="brush-btn brush-avoid" id="btn-brush-avoid"
+              onclick="setBrush('avoid')" style="padding:5px 8px">
+        🔴 AVOID ZONE
+      </button>
+      <button class="brush-btn brush-erase" id="btn-brush-erase"
+              onclick="setBrush('erase')" style="padding:5px 8px">
+        ⬜ ERASE
+      </button>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="color:var(--muted);font-size:10px;white-space:nowrap">Brush: <span id="brush-size-val">20</span>px</span>
+        <input type="range" id="brush-size" min="5" max="120" value="20" style="flex:1"
+               oninput="brushSize=+this.value;document.getElementById('brush-size-val').textContent=this.value">
+      </div>
+      <div style="font-size:10px;color:var(--yellow);text-align:center">SHIFT + drag to paint · drag to rotate</div>
+
+      <button class="btn btn-secondary" id="btn-clean-entire" onclick="cleanEntireObject()"
+              title="Mark every face as a clean zone, skipping manual painting"
+              style="font-size:11px">
+        🔵 CLEAN ENTIRE OBJECT
+      </button>
+
+      <div style="display:flex;gap:6px;align-items:center">
+        <button class="btn btn-secondary" onclick="clearPaint()" title="Clear paint"
+                style="flex:0 0 32px;padding:6px">🗑</button>
+        <span style="color:var(--muted);font-size:10px">
+          Clean: <span id="sel-clean-count" style="color:var(--text)">0</span> tris ·
+          Avoid: <span id="sel-avoid-count" style="color:var(--text)">0</span> tris
+        </span>
+      </div>
+
+      <hr style="border-color:var(--border);margin:2px 0">
+
+      <label style="color:var(--muted);font-size:10px">EXPORT</label>
+      <input type="text" id="export-filename" placeholder="Filename (optional)"
+             style="background:#21262d;border:1px solid var(--border);border-radius:4px;
+                    color:var(--text);padding:5px 7px;font-family:'Courier New',monospace;font-size:11px;width:100%">
+
+      <button class="btn" id="btn-proceed-robot" onclick="proceedToRobot()" disabled
+              title="Paint at least one clean zone first"
+              style="background:#1a3a2a;color:var(--text);border:1px solid var(--green);padding:8px;font-size:11px">
+        ▶ PROCEED TO ROBOT CONTROL
+      </button>
+      <div id="export-status" style="color:var(--muted);font-size:11px;text-align:center;white-space:pre-line"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 4 — ROBOT
+════════════════════════════════ -->
+<div id="tab-robot" class="tab-content">
+  <div style="max-width:680px;display:flex;flex-direction:column;gap:14px">
+    <div class="panel-title" style="font-size:13px;letter-spacing:2px">④ ROBOT CONTROL</div>
+
+    <!-- ── Startup panel ── -->
+    <div id="startup-panel" class="panel" style="gap:8px;padding:12px;border-color:var(--blue)">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span style="color:var(--blue);font-size:11px;letter-spacing:1px">SYSTEM STARTUP</span>
+        <span id="startup-status-pill" style="font-size:10px;padding:2px 8px;border-radius:10px;background:#21262d;color:var(--muted)">IDLE</span>
+      </div>
+      <div style="color:var(--muted);font-size:11px">Configures network, launches UR Driver, MoveIt + RViz, checks joint states, and loads the environment.</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="btn-startup" onclick="startSystem()" style="flex:1;background:var(--blue);color:#000;font-weight:bold">⚡ START SYSTEM</button>
+        <button class="btn btn-secondary" id="btn-startup-toggle-log" onclick="toggleStartupLog()" style="flex:0 0 auto;width:auto;font-size:10px;padding:8px 12px">Show log</button>
+      </div>
+      <div id="startup-log-wrap" style="display:none">
+        <div id="startup-log" style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:8px;font-size:10px;font-family:'Courier New',monospace;color:#8b949e;height:160px;overflow-y:auto;white-space:pre-wrap"></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;font-size:10px;letter-spacing:1px">
+      <span id="stage-pill-preview" class="stage-pill stage-active">1 · PREVIEW</span>
+      <span style="color:var(--muted)">▶</span>
+      <span id="stage-pill-confirm" class="stage-pill">2 · CONFIRM</span>
+      <span style="color:var(--muted)">▶</span>
+      <span id="stage-pill-execute" class="stage-pill">3 · EXECUTE</span>
+    </div>
+    <div id="robot-abort-row" style="display:none;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-secondary" onclick="resetPreview()"
+              title="Kills the current run and immediately starts a fresh preview from scratch"
+              style="border-color:var(--yellow);color:var(--yellow);font-size:11px;width:auto;padding:6px 14px">
+        🔄 RESET / REDO PREVIEW
+      </button>
+      <button class="btn btn-secondary" onclick="abortAndReinitialize()"
+              title="Force-stops the current run and resets back to PREVIEW, so you can redo path planning from scratch"
+              style="border-color:var(--red);color:var(--red);font-size:11px;width:auto;padding:6px 14px">
+        🔁 ABORT & RE-INITIALIZE
+      </button>
+    </div>
+    <div class="moveit-status" id="moveit-status" style="margin:0">Export faces first (② Select Faces → Proceed), then start preview.</div>
+    <div id="robot-panel-preview" class="panel" style="gap:8px;padding:12px">
+      <div style="color:var(--muted);font-size:11px">Launches path planning. The robot model in RViz animates each face's planned trajectory — no physical movement.</div>
+      <button class="btn" id="btn-start-preview" onclick="startPreview()" style="background:var(--yellow);color:#000">▶ START PREVIEW IN RViz</button>
+    </div>
+    <div id="robot-panel-confirm" class="panel" style="display:none;gap:10px;padding:12px">
+      <div id="face-confirm-info" style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:10px;font-size:12px;color:var(--text)">Waiting for first face…</div>
+      <div id="face-progress-dots" style="display:flex;gap:4px;flex-wrap:wrap"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="btn-next-face" onclick="sendSignal('NEXT')" style="flex:1;background:var(--accent)" disabled>▶ Next Face</button>
+        <button class="btn btn-secondary" onclick="sendSignal('CANCEL')" style="flex:0 0 auto">✕ Cancel</button>
+      </div>
+      <div id="robot-final-confirm" style="display:none;border-top:1px solid var(--border);padding-top:10px">
+        <div style="color:var(--green);font-size:12px;margin-bottom:8px">✔ All faces previewed in RViz. Ready to execute on the real robot.</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="sendSignal('EXECUTE')" style="flex:1;background:#22aa55;color:#fff;font-size:13px">🤖 EXECUTE ON ROBOT</button>
+          <button class="btn btn-secondary" onclick="sendSignal('CANCEL')" style="flex:0 0 auto">✕ Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="robot-panel-execute" class="panel" style="display:none;gap:10px;padding:12px">
+      <div style="color:var(--muted);font-size:11px">A fresh RViz window is opening. Red patches appear on the object as each stripe completes.</div>
+      <div style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:10px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+          <span style="color:var(--muted);font-size:10px;letter-spacing:1px">COVERAGE</span>
+          <span id="coverage-pct" style="color:var(--green);font-size:20px;font-weight:bold">0.0%</span>
+        </div>
+        <div style="background:#21262d;border-radius:3px;height:8px;overflow:hidden">
+          <div id="coverage-bar" style="height:100%;width:0%;background:var(--green);transition:width .5s ease;border-radius:3px"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px;color:var(--muted)">
+          <span>Stripes: <span id="coverage-stripes" style="color:var(--text)">0</span></span>
+          <span id="coverage-area" style="color:var(--text)">0 / 0 cm²</span>
+        </div>
+      </div>
+      <div style="color:var(--muted);font-size:10px">Once the coverage above reaches 100%, rotate the table to clean the other side:</div>
+      <button class="btn" id="btn-second-pass" onclick="startSecondPass()" style="background:#aa6622;color:#fff;font-size:13px">🔄 ROTATE 90° + CLEAN FRONT/BACK</button>
+      <button class="btn btn-secondary" onclick="stopRobot()" style="border-color:var(--accent);color:var(--accent)">⏹ STOP ROBOT</button>
+    </div>
+    <div class="panel" style="padding:10px;gap:6px">
+      <div style="color:var(--muted);font-size:10px;letter-spacing:1px">OUTPUT LOG</div>
+      <div id="robot-log" style="background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:8px;font-size:10px;font-family:'Courier New',monospace;color:#8b949e;height:220px;overflow-y:auto;white-space:pre-wrap"></div>
+      <button class="btn btn-secondary" onclick="document.getElementById('robot-log').innerHTML=''" style="font-size:10px;padding:3px 10px;align-self:flex-start">Clear log</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     TAB 5 — SETTINGS
+════════════════════════════════ -->
+<div id="tab-settings" class="tab-content">
+  <div style="padding:20px;overflow-y:auto;width:100%">
+    <h2 style="color:var(--accent);margin-bottom:20px;font-size:14px;letter-spacing:2px">⚙ SETTINGS</h2>
+    <div class="settings-grid">
+
+      <div class="panel setting-group">
+        <div class="panel-title">Camera Settings</div>
+        <div class="setting-row">
+          <label>CAMERA HEIGHT (metres)</label>
+          <input type="number" id="s-camera-height" step="0.01" value="0.165">
+          <div class="setting-hint">Height of camera above turntable surface</div>
+        </div>
+        <div class="setting-row">
+          <label>CAMERA DISTANCE (metres)</label>
+          <input type="number" id="s-camera-distance" step="0.01" value="0.258">
+          <div class="setting-hint">Distance from camera to turntable centre</div>
+        </div>
+        <div class="setting-row">
+          <label>CAMERA TILT ANGLE (degrees)</label>
+          <input type="number" id="s-camera-tilt" step="0.5" value="112.5">
+          <div class="setting-hint">Downward tilt angle of camera</div>
+        </div>
+        <div class="setting-row">
+          <label>DEGREES PER STEP</label>
+          <input type="number" id="s-degrees-step" step="0.5" value="8">
+          <div class="setting-hint">Rotation per photo (8° = 45 photos)</div>
+        </div>
+        <div class="setting-row">
+          <label>CAMERA RESOLUTION</label>
+          <select id="s-resolution">
+            <option value="1280x720">1280 × 720 (default)</option>
+            <option value="848x480">848 × 480</option>
+            <option value="640x480">640 × 480</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="panel setting-group">
+        <div class="panel-title">Hardware Settings</div>
+        <div class="setting-row">
+          <label>ARDUINO PORT</label>
+          <input type="text" id="s-arduino-port" value="/dev/ttyACM0">
+          <div class="setting-hint">e.g. /dev/ttyACM0 or /dev/ttyUSB0</div>
+        </div>
+        <div class="setting-row">
+          <label>ARDUINO ENABLED</label>
+          <select id="s-arduino-enabled" onchange="updateArduinoUI()">
+            <option value="true">Enabled (auto rotation)</option>
+            <option value="false">Disabled (manual rotation)</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label>ROBOT IP ADDRESS</label>
+          <input type="text" id="s-robot-ip" value="192.168.0.43">
+          <div class="setting-hint">UR10 CB3 IP address</div>
+        </div>
+        <div class="setting-row">
+          <label>STEP PIN (Arduino)</label>
+          <input type="number" id="s-step-pin" value="9">
+        </div>
+        <div class="setting-row">
+          <label>DIR PIN (Arduino)</label>
+          <input type="number" id="s-dir-pin" value="8">
+        </div>
+      </div>
+
+      <div class="panel setting-group">
+        <div class="panel-title">Export Settings</div>
+        <div class="setting-row">
+          <label>CLEAN STL OUTPUT PATH</label>
+          <input type="text" id="s-clean-path" value="~/scan_clean.stl">
+        </div>
+        <div class="setting-row">
+          <label>AVOID STL OUTPUT PATH</label>
+          <input type="text" id="s-avoid-path" value="~/scan_avoid.stl">
+        </div>
+        <div class="setting-row">
+          <label>PATH PLANNING SCRIPT</label>
+          <input type="text" id="s-path-planning-script" value="" placeholder="~/Documents/SMR/Scan/STLFiles/path_planning.py">
+          <div class="setting-hint">Full path to path_planning.py</div>
+        </div>
+        <div class="setting-row">
+          <label>CLEANING STANDOFF (m)</label>
+          <input type="number" id="s-cleaning-standoff" step="0.01" min="0" value="0.15">
+          <div class="setting-hint">Distance from tool to surface during cleaning (e.g. 0.15 = 15cm)</div>
+        </div>
+        <div class="setting-row">
+          <label>AUTO SEND TO MOVEIT</label>
+          <select id="s-auto-moveit">
+            <option value="true">Yes — send automatically after export</option>
+            <option value="false">No — send manually</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="panel setting-group">
+        <div class="panel-title">RealSense Depth Settings</div>
+        <div class="setting-row">
+          <label>LASER POWER (0 – 360 mW)</label>
+          <input type="range" id="s-rs-laser" min="0" max="360" step="10" value="150"
+                 oninput="document.getElementById('s-rs-laser-val').textContent=this.value">
+          <div class="setting-hint"><span id="s-rs-laser-val">150</span> mW &nbsp;·&nbsp; Higher = better depth on dark surfaces</div>
+        </div>
+        <div class="setting-row">
+          <label>CONFIDENCE THRESHOLD (0 – 3)</label>
+          <select id="s-rs-confidence">
+            <option value="0">0 — Accept all depth pixels</option>
+            <option value="1" selected>1 — Default</option>
+            <option value="2">2 — Stricter (fewer edge artifacts)</option>
+            <option value="3">3 — Strictest (may lose thin surfaces)</option>
+          </select>
+          <div class="setting-hint">Filters out low-confidence depth pixels</div>
+        </div>
+        <div class="setting-row">
+          <label>DEPTH UNITS</label>
+          <select id="s-rs-depth-units">
+            <option value="0.001" selected>0.001 m — 1 mm resolution (default)</option>
+            <option value="0.0001">0.0001 m — 0.1 mm resolution (high precision)</option>
+          </select>
+          <div class="setting-hint">Finer units = more precise depth, shorter max range</div>
+        </div>
+        <div class="setting-row">
+          <label>RGB / DEPTH SYNC</label>
+          <select id="s-rs-sync">
+            <option value="0">0 — Off</option>
+            <option value="1" selected>1 — Master (tighter alignment)</option>
+          </select>
+          <div class="setting-hint">Master mode reduces color bleed at edges</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="settings-actions">
+      <button class="btn btn-primary" onclick="saveSettings()" style="width:auto;padding:8px 24px">
+        💾 SAVE SETTINGS
+      </button>
+      <button class="btn btn-secondary" onclick="resetSettings()" style="width:auto;padding:8px 24px">
+        ↺ RESET DEFAULTS
+      </button>
+      <span class="save-msg" id="save-msg">✔ Saved!</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Cleaning-complete celebration modal ── -->
+<div id="celebrate-overlay">
+  <div id="celebrate-card">
+    <div class="emoji">🎉</div>
+    <h2>CLEANING COMPLETE</h2>
+    <p>The object has been fully cleaned. Nice work!</p>
+    <button class="btn btn-primary" style="width:auto;padding:8px 28px" onclick="document.getElementById('celebrate-overlay').style.display='none'">✔ DONE</button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════
+     JAVASCRIPT
+════════════════════════════════ -->
+<script>
+// ── Socket.IO ──────────────────────────────────────────────────
+const socket = io();
+let config = {};
+let arduinoEnabled = false;
+let photoCount = 0;
+
+socket.on('connect',    () => setDot('dot-ros', true));
+socket.on('disconnect', () => setDot('dot-ros', false));
+
+socket.on('config', (cfg) => {
+  config = cfg;
+  arduinoEnabled = cfg.arduino_enabled;
+  applyConfigToSettings(cfg);
+  updateArduinoUI();
+});
+
+socket.on('status', (data) => {
+  arduinoEnabled = data.arduino_enabled;
+  updateArduinoUI();
+});
+
+socket.on('camera_frame', (data) => {
+  const img = document.getElementById('camera-img');
+  const ph  = document.getElementById('camera-placeholder');
+  img.src = 'data:image/jpeg;base64,' + data.image;
+  img.style.display = 'block';
+  ph.style.display  = 'none';
+  setDot('dot-camera', true);
+});
+
+socket.on('snapshot', (data) => {
+  const img = document.getElementById('snapshot-img');
+  const ph  = document.getElementById('snapshot-placeholder');
+  img.src = 'data:image/jpeg;base64,' + data.image;
+  img.style.display = 'block';
+  ph.style.display  = 'none';
+  document.getElementById('snapshot-angle').textContent = `Taken at ${data.angle.toFixed(1)}°`;
+  photoCount++;
+  const total = Math.round(360 / (config.degrees_per_step || 7.5));
+  document.getElementById('info-photos').textContent = `${photoCount} / ${total}`;
+});
+
+socket.on('pointcloud_update', (data) => {
+  updatePointcloudViewer(data);
+  updateSelectViewer(data);
+  updateMeshPcdInset();
+  if (data.points) {
+    document.getElementById('info-points').textContent = data.points.length.toLocaleString();
+  }
+});
+
+socket.on('scan_status', (data) => {
+  setScanStatus(data.message);
+});
+
+socket.on('scan_progress', (data) => {
+  const angle = data.angle;
+  document.getElementById('angle-display').textContent = angle.toFixed(1) + '°';
+  document.getElementById('header-angle').textContent  = `${angle.toFixed(1)}° / 360°`;
+  document.getElementById('progress-fill').style.width = (angle / 360 * 100) + '%';
+});
+
+socket.on('scan_complete', (data) => {
+  setScanStatus(`✔ Scan complete!\n${data.points.toLocaleString()} points captured`);
+  setDot('dot-scan', false);
+  document.getElementById('btn-start-scan').disabled = false;
+  document.getElementById('btn-stop-scan').disabled  = true;
+  document.getElementById('btn-capture').disabled    = true;
+  document.getElementById('progress-fill').style.width = '100%';
+  document.getElementById('angle-display').textContent = '360°';
+  markTabDone('scan', true);
+  const scanNextBtn = document.getElementById('btn-scan-next');
+  if (scanNextBtn) scanNextBtn.style.display = 'block';
+});
+
+// ── Arduino UI ─────────────────────────────────────────────────
+function updateArduinoUI() {
+  const statusEl  = document.getElementById('arduino-status');
+  const captureEl = document.getElementById('btn-capture');
+  if (arduinoEnabled) {
+    statusEl.style.background = '#1a2a1a';
+    statusEl.style.color      = 'var(--green)';
+    statusEl.style.border     = '1px solid var(--green)';
+    statusEl.textContent      = '✔ Arduino: AUTO MODE';
+    captureEl.style.display   = 'none';
+    setDot('dot-arduino', true);
+  } else {
+    statusEl.style.background = '#2a1a1a';
+    statusEl.style.color      = 'var(--yellow)';
+    statusEl.style.border     = '1px solid var(--yellow)';
+    statusEl.textContent      = '⚠ Arduino: MANUAL MODE';
+    captureEl.style.display   = 'block';
+    setDot('dot-arduino', false);
+  }
+}
+
+// ── Tab switching ──────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['scan','mesh','select','robot','settings'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'mesh')   resizeMeshCanvas();
+  if (name === 'select') resizeSelectCanvas();
+  if (name === 'robot')  resizeRobotCanvas();
+}
+
+function markTabDone(key, done) {
+  const el = document.getElementById('navtab-' + key);
+  if (!el) return;
+  el.textContent = done ? el.dataset.label + ' ✓' : el.dataset.label;
+}
+
+function newObjectScan() {
+  if (!confirm('Start scanning a new object?\nThis clears the current mesh, painted faces, and progress.')) return;
+
+  try { fetch('/api/robot/stop', { method: 'POST' }); } catch(e) {}
+  const celebrateOverlay = document.getElementById('celebrate-overlay');
+  if (celebrateOverlay) celebrateOverlay.style.display = 'none';
+  const scanNextBtn = document.getElementById('btn-scan-next');
+  if (scanNextBtn) scanNextBtn.style.display = 'none';
+
+  document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('angle-display').textContent = '0.0°';
+  document.getElementById('info-photos').textContent = '0 / 48';
+  setScanStatus('Ready to scan a new object.');
+  document.getElementById('btn-start-scan').disabled = false;
+  document.getElementById('btn-stop-scan').disabled  = true;
+  document.getElementById('btn-capture').disabled    = true;
+
+  builtMeshData = null;
+  document.getElementById('btn-mesh-proceed').disabled = true;
+  document.getElementById('mesh-info').textContent = '';
+  document.getElementById('mesh-status').textContent = 'Complete a scan, then build a mesh.';
+
+  document.getElementById('btn-proceed-robot').disabled = true;
+  document.getElementById('export-status').textContent = '';
+
+  markTabDone('scan', false);
+  markTabDone('mesh', false);
+  markTabDone('select', false);
+
+  resetRobotUi(true);
+  switchTab('scan');
+}
+
+function goToMeshAfterScan() {
+  const scanNextBtn = document.getElementById('btn-scan-next');
+  if (scanNextBtn) scanNextBtn.style.display = 'none';
+  switchTab('mesh');
+}
+
+// ── Status dots ────────────────────────────────────────────────
+function setDot(id, on) {
+  const el = document.getElementById(id);
+  if (el) el.className = 'status-dot ' + (on ? 'dot-green' : 'dot-red');
+}
+
+function setScanStatus(msg) {
+  document.getElementById('scan-status').textContent = msg;
+}
+
+// ── Scan controls ──────────────────────────────────────────────
+function setLivePcdUpdate(enabled) {
+  fetch('/api/scan/live_update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled})
+  });
+}
+
+async function startScan() {
+  photoCount = 0;
+  const res  = await fetch('/api/scan/start', { method: 'POST' });
+  const data = await res.json();
+  if (data.status === 'ok') {
+    setDot('dot-scan', true);
+    document.getElementById('btn-start-scan').disabled = true;
+    document.getElementById('btn-stop-scan').disabled  = false;
+    document.getElementById('angle-display').textContent = '0.0°';
+    document.getElementById('progress-fill').style.width = '0%';
+    document.getElementById('info-photos').textContent =
+      `0 / ${Math.round(360 / (config.degrees_per_step || 7.5))}`;
+    const scanNextBtn = document.getElementById('btn-scan-next');
+    if (scanNextBtn) scanNextBtn.style.display = 'none';
+    markTabDone('scan', false);
+    markTabDone('mesh', false);
+    markTabDone('select', false);
+
+    if (data.mode === 'auto') {
+      setScanStatus('Arduino connected.\nScan running automatically...');
+      document.getElementById('btn-capture').disabled = true;
+    } else {
+      setScanStatus('Rotate table then click\nTABLE ROTATED');
+      document.getElementById('btn-capture').disabled = false;
+    }
+  }
+}
+
+async function captureFrame() {
+  const res  = await fetch('/api/scan/capture', { method: 'POST' });
+  const data = await res.json();
+  if (data.status === 'ok') {
+    const angle = data.next_angle || 0;
+    document.getElementById('angle-display').textContent = angle.toFixed(1) + '°';
+    document.getElementById('header-angle').textContent  = `${angle.toFixed(1)}° / 360°`;
+    document.getElementById('progress-fill').style.width = (angle / 360 * 100) + '%';
+    setScanStatus(`Photo taken at ${data.angle.toFixed(1)}°\nRotate table ${config.degrees_per_step || 7.5}° then click TAKE PHOTO`);
+  } else if (data.status === 'complete') {
+    setScanStatus('✔ Scan complete!');
+    markTabDone('scan', true);
+    const scanNextBtn = document.getElementById('btn-scan-next');
+    if (scanNextBtn) scanNextBtn.style.display = 'block';
+  }
+}
+
+async function stopScan() {
+  await fetch('/api/scan/stop', { method: 'POST' });
+  setDot('dot-scan', false);
+  document.getElementById('btn-start-scan').disabled = false;
+  document.getElementById('btn-stop-scan').disabled  = true;
+  document.getElementById('btn-capture').disabled    = true;
+  const scanNextBtn = document.getElementById('btn-scan-next');
+  if (scanNextBtn) scanNextBtn.style.display = 'none';
+  setScanStatus('Scan stopped');
+}
+
+// ── Pointcloud viewer (Tab 1) ──────────────────────────────────
+let pcdScene, pcdCamera, pcdRenderer, pcdPoints, pcdBbox, pcdGroup;
+let pcdDragging = false, pcdLast = {x:0,y:0};
+let pcdRotX = -1.0, pcdRotY = 0, pcdRotZ = 0, pcdZoom = 3;
+
+function createBboxHelper(scene) {
+  const xMin=-0.40, xMax=0.40;
+  const yMin=-0.40, yMax=0.40;
+  const zMin= 0.01, zMax=0.60;
+
+  const vertices = new Float32Array([
+    xMin,yMin,zMin, xMax,yMin,zMin,
+    xMax,yMin,zMin, xMax,yMax,zMin,
+    xMax,yMax,zMin, xMin,yMax,zMin,
+    xMin,yMax,zMin, xMin,yMin,zMin,
+    xMin,yMin,zMax, xMax,yMin,zMax,
+    xMax,yMin,zMax, xMax,yMax,zMax,
+    xMax,yMax,zMax, xMin,yMax,zMax,
+    xMin,yMax,zMax, xMin,yMin,zMax,
+    xMin,yMin,zMin, xMin,yMin,zMax,
+    xMax,yMin,zMin, xMax,yMin,zMax,
+    xMax,yMax,zMin, xMax,yMax,zMax,
+    xMin,yMax,zMin, xMin,yMax,zMax,
+  ]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+  const mat = new THREE.LineBasicMaterial({ color: 0x00ff44, opacity: 0.7, transparent: true });
+  const bbox = new THREE.LineSegments(geo, mat);
+
+  const crossVerts = new Float32Array([
+    -0.05, 0, 0,  0.05, 0, 0,
+     0, -0.05, 0, 0, 0.05, 0,
+  ]);
+  const crossGeo = new THREE.BufferGeometry();
+  crossGeo.setAttribute('position', new THREE.BufferAttribute(crossVerts, 3));
+  const crossMat = new THREE.LineBasicMaterial({ color: 0xff2200 });
+  const cross = new THREE.LineSegments(crossGeo, crossMat);
+
+  const gridHelper = new THREE.GridHelper(0.80, 8, 0x224422, 0x113311);
+  gridHelper.rotation.x = Math.PI / 2;
+
+  scene.add(bbox);
+  scene.add(cross);
+  scene.add(gridHelper);
+  return bbox;
+}
+
+function initPointcloudViewer() {
+  const canvas = document.getElementById('pcd-canvas');
+  const box    = document.getElementById('pcd-box');
+  const W = box.clientWidth  || 300;
+  const H = box.clientHeight || 300;
+
+  pcdScene    = new THREE.Scene();
+  pcdGroup    = new THREE.Group();
+  pcdScene.add(pcdGroup);
+
+  pcdCamera   = new THREE.PerspectiveCamera(60, W/H, 0.001, 100);
+  pcdCamera.position.set(0, 0, pcdZoom);
+  pcdRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  pcdRenderer.setSize(W, H);
+  pcdRenderer.setClearColor(0x000000);
+
+  createBboxHelper(pcdGroup);
+
+  canvas.addEventListener('mousedown', e => { pcdDragging=true; pcdLast={x:e.clientX,y:e.clientY}; });
+  canvas.addEventListener('mouseup',   () => pcdDragging=false);
+  canvas.addEventListener('mousemove', e => {
+    if (!pcdDragging) return;
+    pcdRotZ += (e.clientX - pcdLast.x) * 0.01;
+    pcdLast = {x:e.clientX,y:e.clientY};
+  });
+  canvas.addEventListener('wheel', e => {
+    pcdZoom += e.deltaY * 0.002;
+    pcdZoom = Math.max(0.1, Math.min(3, pcdZoom));
+  });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    pcdGroup.rotation.x = pcdRotX;
+    pcdGroup.rotation.z = pcdRotZ;
+    pcdCamera.position.z = pcdZoom;
+    pcdRenderer.render(pcdScene, pcdCamera);
+  }
+  animate();
+}
+
+function updatePointcloudViewer(data) {
+  if (!pcdScene) return;
+  if (pcdPoints) pcdGroup.remove(pcdPoints);
+  if (!data.points || data.points.length === 0) return;
+
+  const positions = new Float32Array(data.points.flat());
+  const colors    = data.colors && data.colors.length > 0
+    ? new Float32Array(data.colors.flat())
+    : new Float32Array(data.points.length * 3).fill(0.5);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+
+  const mat = new THREE.PointsMaterial({ size: 0.003, vertexColors: true });
+  pcdPoints = new THREE.Points(geo, mat);
+  pcdGroup.add(pcdPoints);
+}
+
+// ── Mesh tab (② MESH) ─────────────────────────────────────────
+let meshScene, meshCamera, meshRenderer;
+let meshDragging=false, meshLast={x:0,y:0};
+let meshRotX=-1.0, meshRotY=0.5, meshRotZ=0.5, meshZoom=1.5;
+let meshObject = null;
+let builtMeshData = null;
+
+let meshPcdInsetScene, meshPcdInsetCamera, meshPcdInsetRenderer;
+let meshPcdInsetGroup, meshPcdInsetPoints;
+
+function initMeshPcdInset() {
+  const canvas = document.getElementById('mesh-pcd-inset');
+  meshPcdInsetScene  = new THREE.Scene();
+  meshPcdInsetGroup  = new THREE.Group();
+  meshPcdInsetScene.add(meshPcdInsetGroup);
+  meshPcdInsetCamera = new THREE.PerspectiveCamera(45, 1, 0.001, 100);
+  meshPcdInsetCamera.position.set(0, 0, 0.5);
+  meshPcdInsetRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  meshPcdInsetRenderer.setSize(200, 200);
+  meshPcdInsetRenderer.setClearColor(0x000000);
+}
+
+function updateMeshPcdInset() {
+  if (!meshPcdInsetScene || !rawPoints || !rawPoints.length) return;
+  if (meshPcdInsetPoints) { meshPcdInsetGroup.remove(meshPcdInsetPoints); meshPcdInsetPoints = null; }
+  const n = rawPoints.length;
+  const positions = new Float32Array(n*3), colors = new Float32Array(n*3);
+  for (let i=0; i<n; i++) {
+    positions[i*3] = rawPoints[i][0]; positions[i*3+1] = rawPoints[i][1]; positions[i*3+2] = rawPoints[i][2];
+    if (rawColors && rawColors[i]) {
+      colors[i*3] = rawColors[i][0]; colors[i*3+1] = rawColors[i][1]; colors[i*3+2] = rawColors[i][2];
+    } else {
+      colors[i*3] = 0.7; colors[i*3+1] = 0.7; colors[i*3+2] = 0.7;
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+  meshPcdInsetPoints = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.004, vertexColors: true }));
+  meshPcdInsetGroup.add(meshPcdInsetPoints);
+}
+
+function initMeshViewer() {
+  const canvas = document.getElementById('mesh-canvas');
+  const wrap   = canvas.parentElement;
+  const W = wrap.clientWidth || 800, H = wrap.clientHeight || 600;
+  meshScene    = new THREE.Scene();
+  meshCamera   = new THREE.PerspectiveCamera(60, W/H, 0.001, 100);
+  meshCamera.position.set(0, 0, meshZoom);
+  meshRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  meshRenderer.setSize(W, H);
+  meshRenderer.setClearColor(0x000813);
+  meshRenderer.localClippingEnabled = true;  // needed for the mesh-reveal sweep
+  meshScene.add(new THREE.AmbientLight(0x445566, 2));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.2);
+  dl.position.set(1,2,3); meshScene.add(dl);
+  const grid = new THREE.GridHelper(2, 20, 0x222233, 0x111122);
+  meshScene.add(grid);
+  canvas.addEventListener('mousedown', e => { meshDragging=true; meshLast={x:e.clientX,y:e.clientY}; });
+  canvas.addEventListener('mouseup',   () => meshDragging=false);
+  canvas.addEventListener('mousemove', e => {
+    if (!meshDragging) return;
+    meshRotZ += (e.clientX-meshLast.x)*0.01;
+    meshLast = {x:e.clientX,y:e.clientY};
+  });
+  canvas.addEventListener('wheel', e => {
+    meshZoom += e.deltaY*0.002; meshZoom=Math.max(0.3,Math.min(5,meshZoom));
+  });
+  (function animate(){
+    requestAnimationFrame(animate);
+    if (meshObject) { meshObject.rotation.x=meshRotX; meshObject.rotation.z=meshRotZ; }
+    if (meshPcdInsetGroup) { meshPcdInsetGroup.rotation.x=meshRotX; meshPcdInsetGroup.rotation.z=meshRotZ; }
+    meshCamera.position.z = meshZoom;
+    meshRenderer.render(meshScene, meshCamera);
+    if (meshPcdInsetRenderer && meshPcdInsetScene) meshPcdInsetRenderer.render(meshPcdInsetScene, meshPcdInsetCamera);
+  })();
+}
+
+function resizeMeshCanvas() {
+  if (!meshRenderer) return;
+  const wrap = document.getElementById('mesh-canvas').parentElement;
+  meshRenderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  meshCamera.aspect = wrap.clientWidth / wrap.clientHeight;
+  meshCamera.updateProjectionMatrix();
+}
+
+async function buildMesh() {
+  const btn = document.getElementById('btn-build-mesh');
+  const statusEl = document.getElementById('mesh-status');
+  const debugMode = document.getElementById('debug-checkbox')?.checked;
+  // In normal mode always use low-poly @ 5000 tris; debug mode reads the controls.
+  const primitive   = debugMode ? document.getElementById('mesh-primitive-type').value : 'lowpoly';
+  const hullDetail  = debugMode ? +(document.getElementById('mesh-hull-detail')?.value ?? 50) : 50;
+  const lowpolyTris = debugMode ? +(document.getElementById('mesh-lowpoly-tris')?.value ?? 5000) : 5000;
+  btn.disabled = true;
+  btn.textContent = '⏳ Building…';
+  statusEl.textContent = `Fitting ${primitive} to point cloud…`;
+
+  try {
+    const res  = await fetch('/api/mesh/build', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ primitive, hull_detail: hullDetail, lowpoly_tris: lowpolyTris,
+                             filename: document.getElementById('export-filename')?.value?.trim() || '' })
+    });
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      statusEl.textContent = '✗ ' + (data.message || 'Build failed');
+      btn.disabled=false; btn.textContent='⬡ BUILD MESH'; return;
+    }
+
+    await _displayBuiltMesh(data, primitive);
+
+  } catch(e) {
+    statusEl.textContent = '✗ Error: ' + e.message;
+  }
+  btn.disabled=false; btn.textContent='⬡ BUILD MESH';
+}
+
+async function _displayBuiltMesh(data, label) {
+  const statusEl = document.getElementById('mesh-status');
+
+  const stlRes = await fetch(data.download_url);
+  const buf    = await stlRes.arrayBuffer();
+  const geo    = parseSTLBinary(buf);
+  geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  const ctr = new THREE.Vector3();
+  geo.boundingBox.getCenter(ctr);
+  geo.translate(-ctr.x, -ctr.y, -ctr.z);
+
+  if (meshObject) { meshScene.remove(meshObject); meshObject = null; }
+  meshObject = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    color: 0x4488cc, shininess: 60, transparent: true, opacity: 0.85, side: THREE.DoubleSide
+  }));
+  meshScene.add(meshObject);
+
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  meshZoom = Math.max(sz.x, sz.y, sz.z) * 1.8;
+  playMeshRevealAnimation(meshScene, meshObject, null, -sz.y/2, sz.y/2, v => meshRevealing = v);
+
+  builtMeshData = {
+    stlPath: data.stl_path,
+    downloadUrl: data.download_url,
+    triCount: data.tri_count,
+  };
+
+  const tc = data.tri_count;
+  document.getElementById('mesh-info').textContent =
+    `${label} · ${tc} triangles · ${(sz.x*1000).toFixed(0)}×${(sz.y*1000).toFixed(0)}×${(sz.z*1000).toFixed(0)} mm`;
+  statusEl.textContent = `✔ Mesh ready — proceed to select faces`;
+  document.getElementById('btn-mesh-proceed').disabled = false;
+  markTabDone('mesh', true);
+  markTabDone('select', false);
+
+  loadMeshIntoSelectViewer(buf);
+}
+
+async function uploadMeshSTL() {
+  const fileInput = document.getElementById('mesh-upload-file');
+  const btn       = document.getElementById('btn-upload-mesh');
+  const statusEl  = document.getElementById('mesh-status');
+  const file = fileInput.files[0];
+  if (!file) { statusEl.textContent = '✗ Choose an STL file first'; return; }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Loading…';
+  statusEl.textContent = `Loading ${file.name}…`;
+
+  try {
+    const form = new FormData();
+    form.append('stl_file', file);
+    form.append('units', document.getElementById('mesh-upload-units').value);
+    form.append('filename', document.getElementById('export-filename')?.value?.trim() || '');
+
+    const res  = await fetch('/api/mesh/upload', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      statusEl.textContent = '✗ ' + (data.message || 'Upload failed');
+      btn.disabled = false; btn.textContent = '⬆ LOAD STL'; return;
+    }
+    await _displayBuiltMesh(data, file.name);
+  } catch (e) {
+    statusEl.textContent = '✗ Error: ' + e.message;
+  }
+  btn.disabled = false; btn.textContent = '⬆ LOAD STL';
+}
+
+// ── Select tab (③ SELECT FACES) — mesh-based painting ─────────
+let selScene, selCamera, selRenderer;
+let selDragging=false, selRotX=-1.0, selRotY=0.5, selRotZ=0.5, selZoom=1.5, selLast={x:0,y:0};
+let selPcdCentroid=[0,0,0], selPcdPoints=null, selPcdLabels=null, selPcdColors=null, selMeshStlBuf=null, selMeshPositions=null;
+
+// ── Inset mesh viewer ─────────────────────────────────────────
+let selDepthTol = 0.01;          // brush occlusion tolerance (world units), scaled to mesh size on load
+let insetRenderer=null, insetScene=null, insetCamera=null;
+let insetMesh=null, insetMeshGeo=null, insetColors=null;
+let insetPaintMesh=null, insetRaiseEps=0.003;   // translucent "paint shell" overlay
+
+function initInsetViewer() {
+  const canvas = document.getElementById('inset-canvas');
+  if (!canvas) return;
+  insetScene    = new THREE.Scene();
+  insetCamera   = new THREE.PerspectiveCamera(45, 1, 0.001, 100);
+  insetCamera.position.set(0, 0, 1.5);
+  insetRenderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  insetRenderer.setSize(200, 200);
+  insetRenderer.setClearColor(0x0a0f1a, 1);
+  insetScene.add(new THREE.AmbientLight(0xffffff, 1.5));
+  const dl = new THREE.DirectionalLight(0xffffff, 1);
+  dl.position.set(1, 2, 3); insetScene.add(dl);
+  insetScene.add(new THREE.GridHelper(2, 10, 0x222233, 0x111122));
+}
+
+let insetBaseColors = null;
+
+function loadMeshIntoInset(stlBuf) {
+  if (!insetScene) return;
+  const geo = parseSTLBinary(stlBuf);
+  geo.computeBoundingBox();
+  const ctr = new THREE.Vector3(); geo.boundingBox.getCenter(ctr);
+  geo.translate(-ctr.x, -ctr.y, -ctr.z);
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  insetCamera.position.z = Math.max(sz.x, sz.y, sz.z) * 1.8;
+
+  const nTris = geo.attributes.position.count / 3;
+  insetColors     = new Float32Array(nTris * 3 * 3);
+  insetBaseColors = new Float32Array(nTris * 3 * 3);
+  const mPos = geo.attributes.position;
+
+  if (rawPoints && rawPoints.length) {
+    const pts = rawPoints, cols = rawColors, np = pts.length;
+    const refX=ctr.x, refY=ctr.y, refZ=ctr.z;
+    const step = Math.max(1, Math.floor(np/8000));
+    const spx=[],spy=[],spz=[],spr=[],spg=[],spb=[];
+    for(let i=0;i<np;i+=step){
+      spx.push(pts[i][0]-refX);
+      spy.push(pts[i][1]-refY);
+      spz.push(pts[i][2]-refZ);
+      if(cols&&cols[i]){spr.push(cols[i][0]);spg.push(cols[i][1]);spb.push(cols[i][2]);}
+      else{spr.push(0.5);spg.push(0.5);spb.push(0.5);}
+    }
+    const ns=spx.length;
+
+    for(let t=0;t<nTris;t++){
+      const i=t*3;
+      const tx=(mPos.getX(i)+mPos.getX(i+1)+mPos.getX(i+2))/3;
+      const ty=(mPos.getY(i)+mPos.getY(i+1)+mPos.getY(i+2))/3;
+      const tz=(mPos.getZ(i)+mPos.getZ(i+1)+mPos.getZ(i+2))/3;
+      let bestD=Infinity,bestI=0;
+      for(let p=0;p<ns;p++){
+        const dx=spx[p]-tx,dy=spy[p]-ty,dz=spz[p]-tz,d=dx*dx+dy*dy+dz*dz;
+        if(d<bestD){bestD=d;bestI=p;}
+      }
+      const r=spr[bestI],g=spg[bestI],b=spb[bestI];
+      const vi=t*3;
+      for(let v=0;v<3;v++){
+        insetBaseColors[(vi+v)*3]=r;insetBaseColors[(vi+v)*3+1]=g;insetBaseColors[(vi+v)*3+2]=b;
+        insetColors[(vi+v)*3]=r;   insetColors[(vi+v)*3+1]=g;    insetColors[(vi+v)*3+2]=b;
+      }
+    }
+  } else {
+    for(let i=0;i<nTris*9;i+=3){insetBaseColors[i]=0.5;insetBaseColors[i+1]=0.5;insetBaseColors[i+2]=0.5;}
+    insetColors.set(insetBaseColors);
+  }
+
+  geo.setAttribute('color', new THREE.BufferAttribute(insetColors, 3));
+  geo.attributes.color.needsUpdate = true;
+  if (insetMesh) { insetScene.remove(insetMesh); insetMesh=null; }
+  insetMeshGeo = geo;
+  insetMesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    vertexColors: true, shininess: 40, side: THREE.DoubleSide
+  }));
+  insetScene.add(insetMesh);
+}
+
+function updateInsetFromPoints() {
+  if (!insetMesh || !insetMeshGeo || !triLabels) return;
+  // Shell-based paint overlay: a separate translucent mesh raised above the
+  // surface covers only painted (clean) triangles, leaving the scan-colour
+  // texture underneath fully visible at all times.
+  if (insetPaintMesh) { insetScene.remove(insetPaintMesh); insetPaintMesh = null; }
+
+  const pos = insetMeshGeo.attributes.position;
+  const nTris = pos.count / 3;
+  const shellPositions = [];
+  for (let t = 0; t < nTris && t < triLabels.length; t++) {
+    if (triLabels[t] !== 1) continue;
+    const i = t*3;
+    const ax=pos.getX(i),   ay=pos.getY(i),   az=pos.getZ(i);
+    const bx=pos.getX(i+1), by=pos.getY(i+1), bz=pos.getZ(i+1);
+    const cx=pos.getX(i+2), cy=pos.getY(i+2), cz=pos.getZ(i+2);
+    const e1x=bx-ax, e1y=by-ay, e1z=bz-az;
+    const e2x=cx-ax, e2y=cy-ay, e2z=cz-az;
+    let nx=e1y*e2z-e1z*e2y, ny=e1z*e2x-e1x*e2z, nz=e1x*e2y-e1y*e2x;
+    const len = Math.hypot(nx,ny,nz) || 1;
+    nx/=len; ny/=len; nz/=len;
+    shellPositions.push(
+      ax+nx*insetRaiseEps, ay+ny*insetRaiseEps, az+nz*insetRaiseEps,
+      bx+nx*insetRaiseEps, by+ny*insetRaiseEps, bz+nz*insetRaiseEps,
+      cx+nx*insetRaiseEps, cy+ny*insetRaiseEps, cz+nz*insetRaiseEps
+    );
+  }
+
+  if (shellPositions.length) {
+    const shellGeo = new THREE.BufferGeometry();
+    shellGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(shellPositions), 3));
+    insetPaintMesh = new THREE.Mesh(shellGeo, new THREE.MeshBasicMaterial({
+      color: 0x4499ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide,
+      depthWrite: false, depthTest: false
+    }));
+    insetPaintMesh.renderOrder = 999;
+    insetPaintMesh.rotation.set(insetMesh.rotation.x, 0, insetMesh.rotation.z);
+    insetScene.add(insetPaintMesh);
+  }
+}
+
+let selMesh = null;
+let selMeshGeo = null;
+let selHoverMesh  = null;
+let selHoverEdges = null;
+let selHoveredTris = [];
+let triLabels = null;
+let triColors = null;
+let selPainting = false;
+let currentBrush = 'clean';
+let brushSize = 20;
+const selRaycaster = new THREE.Raycaster();
+
+function initSelectViewer() {
+  const canvas = document.getElementById('select-canvas');
+  const wrap   = document.getElementById('select-canvas-wrap');
+  const W = wrap.clientWidth || 800, H = wrap.clientHeight || 600;
+  selScene    = new THREE.Scene();
+  selCamera   = new THREE.PerspectiveCamera(60, W/H, 0.001, 100);
+  selCamera.position.set(0, 0, selZoom);
+  selRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  selRenderer.setSize(W, H);
+  selRenderer.setClearColor(0x000813);
+  selRenderer.localClippingEnabled = true;  // needed for the mesh-reveal sweep
+  selScene.add(new THREE.AmbientLight(0x334455, 2));
+  const dl = new THREE.DirectionalLight(0xffffff, 1);
+  dl.position.set(2,3,4); selScene.add(dl);
+  selScene.add(new THREE.GridHelper(2, 20, 0x222233, 0x111122));
+
+  canvas.addEventListener('mousedown', e => {
+    if (e.shiftKey) { selPainting=true; paintFace(e); }
+    else            { selDragging=true; selLast={x:e.clientX,y:e.clientY}; }
+  });
+  canvas.addEventListener('mouseup',   () => { selDragging=false; selPainting=false; });
+  canvas.addEventListener('mousemove', e => {
+    if (selPainting) { paintFace(e); return; }
+    if (selDragging) {
+      selRotZ += (e.clientX-selLast.x)*0.01;
+      selLast = {x:e.clientX,y:e.clientY};
+      clearHover(); return;
+    }
+    updateHover(e);
+  });
+  canvas.addEventListener('mouseleave', () => clearHover());
+  canvas.addEventListener('wheel', e => {
+    selZoom += e.deltaY*0.002; selZoom=Math.max(0.3,Math.min(5,selZoom));
+  });
+  (function animate(){
+    requestAnimationFrame(animate);
+    if (selMesh)      { selMesh.rotation.x=selRotX;      selMesh.rotation.z=selRotZ; }
+    if (selHoverMesh) { selHoverMesh.rotation.x=selRotX; selHoverMesh.rotation.z=selRotZ; }
+    if (selHoverEdges){ selHoverEdges.rotation.x=selRotX;selHoverEdges.rotation.z=selRotZ; }
+    if (selPcdPoints) { selPcdPoints.rotation.x=selRotX; selPcdPoints.rotation.z=selRotZ; }
+    if (insetMesh)    { insetMesh.rotation.x=selRotX;    insetMesh.rotation.z=selRotZ; }
+    selCamera.position.z = selZoom;
+    selRenderer.render(selScene, selCamera);
+    if (insetRenderer && insetScene) insetRenderer.render(insetScene, insetCamera);
+  })();
+}
+
+function loadMeshIntoSelectViewer(stlBuf) {
+  selMeshStlBuf = stlBuf;
+
+  if (selPcdPoints) { selScene.remove(selPcdPoints); selPcdPoints=null; }
+  if (selMesh)      { selScene.remove(selMesh);      selMesh=null; }
+  if (selHoverMesh) { selScene.remove(selHoverMesh); selHoverMesh=null; }
+  if (selHoverEdges){ selScene.remove(selHoverEdges);selHoverEdges=null; }
+  selHoveredTris = [];
+
+  const geo = parseSTLBinary(stlBuf);
+  geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  const ctr = new THREE.Vector3(); geo.boundingBox.getCenter(ctr);
+  geo.translate(-ctr.x, -ctr.y, -ctr.z);
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  selZoom = Math.max(sz.x, sz.y, sz.z) * 1.8;
+  selDepthTol = Math.max(sz.x, sz.y, sz.z) * 0.05;  // 5% of largest dim = linear view-space tolerance
+
+  const nTris = geo.attributes.position.count / 3;
+  triLabels = new Int8Array(nTris).fill(2);
+  triColors = new Float32Array(nTris * 3 * 3);
+  for(let ti=0; ti<nTris*3; ti++){triColors[ti*3]=1.0; triColors[ti*3+1]=0.2; triColors[ti*3+2]=0.2;}
+  geo.setAttribute('color', new THREE.BufferAttribute(triColors, 3));
+
+  selMeshGeo = geo;
+  selMesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    vertexColors: true, shininess: 50, side: THREE.DoubleSide
+  }));
+  selScene.add(selMesh);
+
+  if (rawPoints && rawPoints.length) {
+    const pts = rawPoints, cols = rawColors, n = pts.length;
+    const filtPos = new Float32Array(n*3), filtCol = new Float32Array(n*3);
+    for(let i=0;i<n;i++){
+      filtPos[i*3]  = pts[i][0]*1000;
+      filtPos[i*3+1]= pts[i][1]*1000;
+      filtPos[i*3+2]= pts[i][2]*1000;
+      if(cols && cols[i]){ filtCol[i*3]=cols[i][0]; filtCol[i*3+1]=cols[i][1]; filtCol[i*3+2]=cols[i][2]; }
+      else { filtCol[i*3]=0.7; filtCol[i*3+1]=0.7; filtCol[i*3+2]=0.7; }
+    }
+    const pcdGeo = new THREE.BufferGeometry();
+    pcdGeo.setAttribute('position', new THREE.BufferAttribute(filtPos, 3));
+    pcdGeo.setAttribute('color',    new THREE.BufferAttribute(filtCol, 3));
+    selPcdPoints = new THREE.Points(pcdGeo, new THREE.PointsMaterial({
+      size: 1.5, vertexColors: true, sizeAttenuation: false,
+      transparent: true, opacity: 0.5, depthWrite: false
+    }));
+    selScene.add(selPcdPoints);
+  }
+
+  document.getElementById('select-status').textContent =
+    `${nTris} faces — SHIFT+drag to paint`;
+  document.getElementById('btn-proceed-robot').disabled = false;
+  updateTriCounts();
+  loadMeshIntoInset(stlBuf);
+  playMeshRevealAnimation(selScene, selMesh, selPcdPoints, -sz.y/2, sz.y/2, v => selRevealing = v);
+}
+
+function paintFace(e) {
+  if (!selMesh || !selMeshGeo) return;
+  const tris = _getHoverCandidates(e);
+  if (!tris.length) return;
+  const col   = currentBrush==='clean' ? [0.2,0.5,1] :
+                currentBrush==='avoid' ? [1,0.2,0.2] : [0.35,0.35,0.35];
+  const label = currentBrush==='clean' ? 1 : currentBrush==='avoid' ? 2 : 0;
+  for (const t of tris) {
+    const i = t*3;
+    triLabels[t] = label;
+    for (let v=0; v<3; v++) {
+      triColors[(i+v)*3]=col[0]; triColors[(i+v)*3+1]=col[1]; triColors[(i+v)*3+2]=col[2];
+    }
+  }
+  selMeshGeo.attributes.color.needsUpdate = true;
+  updateTriCounts();
+  updateInsetFromPoints();
+  updateHover(e);
+}
+
+function _getHoverCandidates(e) {
+  if (!selMesh || !selMeshGeo) return [];
+  const canvas = document.getElementById('select-canvas');
+  const rect   = canvas.getBoundingClientRect();
+  const mouse  = new THREE.Vector2(
+    ((e.clientX-rect.left)/rect.width)*2-1,
+   -((e.clientY-rect.top)/rect.height)*2+1
+  );
+  selMesh.rotation.set(selRotX, 0, selRotZ);
+  selMesh.updateMatrixWorld();
+  selCamera.updateMatrixWorld();
+  selRaycaster.setFromCamera(mouse, selCamera);
+  const hits = selRaycaster.intersectObject(selMesh);
+  if (!hits.length) return [];
+  // Linear view-space depth test — avoids the severe non-linearity of NDC z
+  // at this camera's near/far ratio, preventing paint-through to the far side.
+  const hitViewZ = hits[0].point.clone().applyMatrix4(selCamera.matrixWorldInverse).z;
+  const depthTol = selDepthTol;
+  const projMtx   = new THREE.Matrix4().multiplyMatrices(
+    selCamera.projectionMatrix, selCamera.matrixWorldInverse
+  ).multiply(selMesh.matrixWorld);
+  const viewMtx = new THREE.Matrix4().multiplyMatrices(selCamera.matrixWorldInverse, selMesh.matrixWorld);
+  const pos = selMeshGeo.attributes.position;
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const brushR = brushSize;
+  const result = [];
+  const nTris = pos.count / 3;
+  for (let t = 0; t < nTris; t++) {
+    const i = t*3;
+    const ax=pos.getX(i), ay=pos.getY(i), az=pos.getZ(i);
+    const bx=pos.getX(i+1),by=pos.getY(i+1),bz=pos.getZ(i+1);
+    const cx=pos.getX(i+2),cy=pos.getY(i+2),cz=pos.getZ(i+2);
+    const ctrX=(ax+bx+cx)/3, ctrY=(ay+by+cy)/3, ctrZ=(az+bz+cz)/3;
+    // Skip triangles meaningfully farther from camera than the clicked surface.
+    const viewZ = new THREE.Vector3(ctrX,ctrY,ctrZ).applyMatrix4(viewMtx).z;
+    if (viewZ < hitViewZ - depthTol) continue;
+    const v4 = new THREE.Vector4(ctrX,ctrY,ctrZ,1).applyMatrix4(projMtx);
+    if (v4.w <= 0) continue;
+    const sx=(v4.x/v4.w*0.5+0.5)*rect.width, sy=(-v4.y/v4.w*0.5+0.5)*rect.height;
+    if (Math.sqrt((sx-mx)**2+(sy-my)**2) >= brushR) continue;
+    result.push(t);
+  }
+  return result;
+}
+
+function updateHover(e) {
+  if (!selMesh || !selMeshGeo) return;
+  const tris = _getHoverCandidates(e);
+  if (tris.length === selHoveredTris.length && tris.every((v,i) => v === selHoveredTris[i])) return;
+  selHoveredTris = tris;
+  if (selHoverMesh)  { selScene.remove(selHoverMesh);  selHoverMesh=null;  }
+  if (selHoverEdges) { selScene.remove(selHoverEdges); selHoverEdges=null; }
+  if (!tris.length) return;
+
+  const pos = selMeshGeo.attributes.position;
+  const RAISE = 0.003;
+  const normalMtx2 = new THREE.Matrix3().getNormalMatrix(selMesh.matrixWorld);
+  const hoverPositions = [], edgePositions = [];
+
+  for (const t of tris) {
+    const i = t*3;
+    const verts = [0,1,2].map(v => new THREE.Vector3(pos.getX(i+v),pos.getY(i+v),pos.getZ(i+v)));
+    const norm = new THREE.Vector3()
+      .crossVectors(
+        new THREE.Vector3().subVectors(verts[1],verts[0]),
+        new THREE.Vector3().subVectors(verts[2],verts[0])
+      ).applyMatrix3(normalMtx2).normalize();
+    for (const v of verts) {
+      const r = v.clone().addScaledVector(norm, RAISE);
+      hoverPositions.push(r.x,r.y,r.z);
+    }
+    for (let v=0;v<3;v++) {
+      const a=verts[v].clone().addScaledVector(norm,RAISE*1.5);
+      const b=verts[(v+1)%3].clone().addScaledVector(norm,RAISE*1.5);
+      edgePositions.push(a.x,a.y,a.z, b.x,b.y,b.z);
+    }
+  }
+
+  const fillCol = currentBrush==='clean' ? 0x4499ff : currentBrush==='avoid' ? 0xff4444 : 0xffffff;
+  const fillGeo = new THREE.BufferGeometry();
+  fillGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(hoverPositions),3));
+  selHoverMesh = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({
+    color:fillCol, transparent:true, opacity:0.28, side:THREE.DoubleSide, depthWrite:false
+  }));
+  selHoverMesh.rotation.set(selRotX, 0, selRotZ);
+  selScene.add(selHoverMesh);
+
+  const edgeGeo = new THREE.BufferGeometry();
+  edgeGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(edgePositions),3));
+  selHoverEdges = new THREE.LineSegments(edgeGeo, new THREE.LineBasicMaterial({
+    color:fillCol, transparent:true, opacity:0.95, depthWrite:false
+  }));
+  selHoverEdges.rotation.set(selRotX, 0, selRotZ);
+  selScene.add(selHoverEdges);
+}
+
+function clearHover() {
+  if (selHoverMesh)  { selScene.remove(selHoverMesh);  selHoverMesh=null;  }
+  if (selHoverEdges) { selScene.remove(selHoverEdges); selHoverEdges=null; }
+  selHoveredTris = [];
+}
+
+function updateTriCounts() {
+  if (!triLabels) return;
+  let clean=0, avoid=0;
+  for(let i=0;i<triLabels.length;i++){ if(triLabels[i]===1) clean++; else if(triLabels[i]===2) avoid++; }
+  const ce=document.getElementById('sel-clean-count'), ae=document.getElementById('sel-avoid-count');
+  if(ce) ce.textContent=clean; if(ae) ae.textContent=avoid;
+}
+
+let rawPoints = null, rawColors = null;
+function updateSelectViewer(data) {
+  if (data.points) rawPoints = data.points;
+  if (data.colors) rawColors = data.colors;
+}
+
+async function proceedToRobot() {
+  if (!builtMeshData) { alert('Build a mesh first (② MESH).'); return; }
+  if (!triLabels) { alert('Paint some faces first.'); return; }
+  const cleanIdx=[], avoidIdx=[];
+  for(let i=0;i<triLabels.length;i++){
+    if(triLabels[i]===1) cleanIdx.push(i);
+    else if(triLabels[i]===2) avoidIdx.push(i);
+  }
+  if(!cleanIdx.length){ alert('Paint at least one clean zone first.'); return; }
+
+  const btn      = document.getElementById('btn-proceed-robot');
+  const statusEl = document.getElementById('export-status');
+  btn.disabled   = true;
+  statusEl.textContent = 'Splitting mesh by painted zones…';
+
+  try {
+    const filename = document.getElementById('export-filename').value.trim();
+    const res = await fetch('/api/mesh/split', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        stl_path:     builtMeshData.stlPath,
+        clean_tris:   cleanIdx,
+        avoid_tris:   avoidIdx,
+        filename,
+      })
+    });
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      statusEl.textContent = '✗ ' + (data.message || 'Split failed');
+      btn.disabled = false; return;
+    }
+    statusEl.textContent = '✔ Zones ready — switching to robot control';
+    resetRobotUi(true);
+    markTabDone('select', true);
+    switchTab('robot');
+  } catch(e) {
+    statusEl.textContent = '✗ Error: ' + e.message;
+  }
+  btn.disabled = false;
+}
+
+function setBrush(type) {
+  currentBrush = type;
+  ['clean','avoid','erase'].forEach(t => {
+    document.getElementById('btn-brush-' + t).classList.toggle('active', t === type);
+  });
+}
+
+function clearPaint() {
+  if (triLabels) {
+    triLabels.fill(2);
+    if (triColors) {
+      for(let ti=0;ti<triLabels.length*3;ti++){triColors[ti*3]=1;triColors[ti*3+1]=0.2;triColors[ti*3+2]=0.2;}
+    }
+    if (selMeshGeo) selMeshGeo.attributes.color.needsUpdate=true;
+  }
+  updateTriCounts();
+  updateInsetFromPoints();
+  document.getElementById('export-status').textContent='';
+}
+
+function cleanEntireObject() {
+  if (!triLabels) { alert('Build or load a mesh first.'); return; }
+  triLabels.fill(1);
+  if (triColors) {
+    for(let ti=0;ti<triLabels.length*3;ti++){triColors[ti*3]=0.2;triColors[ti*3+1]=0.5;triColors[ti*3+2]=1;}
+  }
+  if (selMeshGeo) selMeshGeo.attributes.color.needsUpdate=true;
+  updateTriCounts();
+  updateInsetFromPoints();
+  document.getElementById('export-status').textContent='';
+}
+
+async function startSystem() {
+  const btn  = document.getElementById('btn-startup');
+  const pill = document.getElementById('startup-status-pill');
+  const log  = document.getElementById('startup-log');
+  btn.disabled = true;
+  btn.textContent = '⏳ STARTING…';
+  pill.textContent = 'RUNNING';
+  pill.style.background = '#1a2a3a';
+  pill.style.color = 'var(--blue)';
+  log.textContent = '';
+  document.getElementById('startup-log-wrap').style.display = 'block';
+  document.getElementById('btn-startup-toggle-log').textContent = 'Hide log';
+  try {
+    const res  = await fetch('/api/startup', { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'error') {
+      pill.textContent = 'ERROR';
+      pill.style.color = 'var(--red)';
+      btn.textContent = '⚡ RETRY STARTUP';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    pill.textContent = 'ERROR';
+    pill.style.color = 'var(--red)';
+    btn.textContent = '⚡ RETRY STARTUP';
+    btn.disabled = false;
+  }
+}
+
+function toggleStartupLog() {
+  const wrap = document.getElementById('startup-log-wrap');
+  const btn  = document.getElementById('btn-startup-toggle-log');
+  const vis  = wrap.style.display !== 'none';
+  wrap.style.display = vis ? 'none' : 'block';
+  btn.textContent = vis ? 'Show log' : 'Hide log';
+}
+
+let _cleaningPass = 1;
+function initRobotControls() {
+  socket.on('startup_log', d => {
+    const el = document.getElementById('startup-log');
+    if (!el) return;
+    el.textContent += d.line + '\n';
+    el.scrollTop = el.scrollHeight;
+  });
+  socket.on('startup_done', d => {
+    const pill = document.getElementById('startup-status-pill');
+    const btn  = document.getElementById('btn-startup');
+    if (d.code === 0) {
+      pill.textContent = 'READY';
+      pill.style.background = '#1a3a1a';
+      pill.style.color = 'var(--green)';
+      btn.textContent = '✔ SYSTEM READY';
+      btn.style.background = 'var(--green)';
+    } else {
+      pill.textContent = 'ERROR';
+      pill.style.background = '#3a1a1a';
+      pill.style.color = 'var(--red)';
+      btn.textContent = '⚡ RETRY STARTUP';
+      btn.style.background = 'var(--blue)';
+    }
+    btn.disabled = false;
+    if (d.code !== 0) {
+      document.getElementById('startup-log-wrap').style.display = 'block';
+      document.getElementById('btn-startup-toggle-log').textContent = 'Hide log';
+    }
+  });
+
+  socket.on('robot_log', d => appendRobotLog(d.line));
+  socket.on('robot_done', d => {
+    appendRobotLog(d.message);
+    if (_cleaningPass === 1 && d.code === 0) {
+      setRobotStatus('✔ Pass 1 complete — rotate 90° and clean front/back when ready.');
+    } else {
+      const wasFinalPass = _cleaningPass === 2;
+      setRobotStage('idle');
+      _cleaningPass = 1;
+      if (wasFinalPass && d.code === 0) showCleaningComplete();
+    }
+  });
+  socket.on('preview_face', d => {
+    const tl = d.type.toUpperCase();
+    document.getElementById('face-confirm-info').innerHTML =
+      `<b>Face ${d.index+1}</b>: <span style="color:var(--yellow)">${d.label}</span> (${tl}) — <b>${d.stripes}</b> stripes<br>`+
+      `<span style="color:var(--muted);font-size:10px">Planning… watch RViz for trajectory.</span>`;
+    document.getElementById('btn-next-face').disabled = true;
+    appendRobotLog(`[PREVIEW] Face ${d.index+1}: ${d.label} (${tl}), ${d.stripes} stripes`);
+  });
+  socket.on('preview_face_done', d => {
+    document.getElementById('btn-next-face').disabled = false;
+    document.getElementById('face-confirm-info').innerHTML =
+      document.getElementById('face-confirm-info').innerHTML.replace(
+        'Planning… watch RViz for trajectory.','✔ Trajectory in RViz — press Next Face.');
+    const dot = document.createElement('span');
+    dot.textContent = `✔ Face ${d.index+1}`;
+    dot.style.cssText = 'background:#1a3a1a;color:var(--green);border:1px solid var(--green);border-radius:10px;padding:2px 8px;font-size:10px';
+    document.getElementById('face-progress-dots').appendChild(dot);
+  });
+  socket.on('preview_all_done', () => {
+    document.getElementById('btn-next-face').disabled = true;
+    document.getElementById('face-confirm-info').innerHTML = '<span style="color:var(--green)">✔ All faces previewed.</span>';
+    document.getElementById('robot-final-confirm').style.display = 'block';
+    setRobotStatus('All faces previewed — confirm execution or cancel.');
+    appendRobotLog('[PREVIEW] All faces done.');
+  });
+  socket.on('preview_aborted', () => { setRobotStatus('Preview cancelled.'); setRobotStage('idle'); appendRobotLog('[PREVIEW] Aborted.'); });
+  socket.on('coverage_update', d => {
+    document.getElementById('coverage-pct').textContent     = d.pct.toFixed(1) + '%';
+    document.getElementById('coverage-bar').style.width     = Math.min(d.pct,100) + '%';
+    document.getElementById('coverage-stripes').textContent = d.stripe;
+    document.getElementById('coverage-area').textContent    = `${d.covered_cm2.toFixed(0)} / ${d.total_cm2.toFixed(0)} cm²`;
+    const hue = Math.round(120 - d.pct * 1.2);
+    document.getElementById('coverage-bar').style.background = `hsl(${Math.max(0,hue)},80%,45%)`;
+  });
+}
+
+function resetRobotUi(clearLog=false) {
+  _cleaningPass = 1;
+  setRobotStage('idle');
+  setRobotStatus('Export faces first (② Select Faces → Proceed), then start preview.');
+
+  const faceInfo = document.getElementById('face-confirm-info');
+  if (faceInfo) faceInfo.innerHTML = 'Waiting for first face…';
+
+  const finalConfirm = document.getElementById('robot-final-confirm');
+  if (finalConfirm) finalConfirm.style.display = 'none';
+
+  const nextFace = document.getElementById('btn-next-face');
+  if (nextFace) nextFace.disabled = true;
+
+  const dots = document.getElementById('face-progress-dots');
+  if (dots) dots.innerHTML = '';
+
+  const secondPass = document.getElementById('btn-second-pass');
+  if (secondPass) {
+    secondPass.disabled = false;
+    secondPass.textContent = '🔄 ROTATE 90° + CLEAN FRONT/BACK';
+  }
+
+  const pct = document.getElementById('coverage-pct');
+  if (pct) pct.textContent = '0.0%';
+  const stripes = document.getElementById('coverage-stripes');
+  if (stripes) stripes.textContent = '0';
+  const area = document.getElementById('coverage-area');
+  if (area) area.textContent = '0 / 0 cm²';
+  const bar = document.getElementById('coverage-bar');
+  if (bar) {
+    bar.style.width = '0%';
+    bar.style.background = 'var(--green)';
+  }
+
+  if (clearLog) {
+    const log = document.getElementById('robot-log');
+    if (log) log.textContent = '';
+  }
+}
+
+function setRobotStatus(msg) { document.getElementById('moveit-status').textContent = msg; }
+function appendRobotLog(line) {
+  if (['PREVIEW_ALL_DONE','PREVIEW_ABORTED'].includes(line) || line.startsWith('PREVIEW_FACE') || line.startsWith('COVERAGE_UPDATE:')) return;
+  const el = document.getElementById('robot-log');
+  el.textContent += line + '\n'; el.scrollTop = el.scrollHeight;
+}
+function setRobotStage(stage) {
+  const pnl = { preview: document.getElementById('robot-panel-preview'),
+                confirm: document.getElementById('robot-panel-confirm'),
+                execute: document.getElementById('robot-panel-execute') };
+  const pil = { preview: document.getElementById('stage-pill-preview'),
+                confirm: document.getElementById('stage-pill-confirm'),
+                execute: document.getElementById('stage-pill-execute') };
+  Object.values(pnl).forEach(p => p && (p.style.display='none'));
+  Object.values(pil).forEach(p => p && p.classList.remove('stage-active','stage-done'));
+  document.getElementById('robot-abort-row').style.display = stage==='idle' ? 'none' : 'flex';
+  if (stage==='idle') {
+    pnl.preview.style.display='block'; pil.preview.classList.add('stage-active');
+    document.getElementById('robot-final-confirm').style.display='none';
+    document.getElementById('face-progress-dots').innerHTML='';
+    const b=document.getElementById('btn-start-preview'); b.disabled=false; b.textContent='▶ START PREVIEW IN RViz';
+  } else if (stage==='previewing') {
+    pnl.confirm.style.display='block'; pil.preview.classList.add('stage-done'); pil.confirm.classList.add('stage-active');
+  } else if (stage==='executing') {
+    pnl.execute.style.display='block'; pil.preview.classList.add('stage-done'); pil.confirm.classList.add('stage-done'); pil.execute.classList.add('stage-active');
+    ['coverage-pct','coverage-stripes','coverage-area'].forEach(id => {
+      const el=document.getElementById(id); if(el) el.textContent = id==='coverage-pct'?'0.0%':id==='coverage-area'?'0 / 0 cm²':'0';
+    });
+    const bar=document.getElementById('coverage-bar'); if(bar){bar.style.width='0%';bar.style.background='var(--green)';}
+  }
+}
+async function startPreview() {
+  const btn=document.getElementById('btn-start-preview');
+  btn.disabled=true; btn.textContent='⏳ Starting…';
+  setRobotStatus('Starting preview…'); appendRobotLog('--- Starting preview ---');
+  try {
+    const res=await fetch('/api/robot/preview',{method:'POST'});
+    const data=await res.json();
+    if(data.status!=='ok'){
+      setRobotStatus('✗ '+(data.message||'error')); appendRobotLog('✗ '+(data.message||'error'));
+      btn.disabled=false; btn.textContent='▶ START PREVIEW IN RViz'; return;
+    }
+    setRobotStage('previewing'); setRobotStatus('Preview running — watch RViz.');
+  } catch(e) {
+    setRobotStatus('✗ '+e.message); appendRobotLog('✗ '+e.message);
+    btn.disabled=false; btn.textContent='▶ START PREVIEW IN RViz';
+  }
+}
+async function sendSignal(signal) {
+  if(signal==='EXECUTE'){setRobotStage('executing');setRobotStatus('Launching RViz…');appendRobotLog('--- Robot executing ---');}
+  else if(signal==='CANCEL'){setRobotStatus('Cancelling…');}
+  try { await fetch('/api/robot/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal})}); }
+  catch(e){appendRobotLog('Signal error: '+e.message);}
+}
+async function stopRobot() {
+  if(!confirm('Stop the robot immediately?'))return;
+  await fetch('/api/robot/stop',{method:'POST'}); setRobotStatus('⚠ Stop requested.');
+}
+async function abortAndReinitialize() {
+  if(!confirm("Abort the current run and reset?\nYou'll need to redo preview → confirm → execute."))return;
+  appendRobotLog('--- Abort & re-initialize requested by user ---');
+  try { await fetch('/api/robot/stop',{method:'POST'}); } catch(e) {}
+  _cleaningPass = 1;
+  setRobotStage('idle');
+  setRobotStatus('⚠ Aborted and reset — ready to start a fresh preview.');
+}
+async function resetPreview() {
+  if(!confirm('Restart the preview from scratch?'))return;
+  appendRobotLog('--- Resetting preview ---');
+  setRobotStatus('Resetting preview…');
+  try {
+    const res  = await fetch('/api/robot/reset_preview',{method:'POST'});
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      appendRobotLog('✗ '+(data.message||'error'));
+      setRobotStatus('✗ '+(data.message||'error'));
+      return;
+    }
+    document.getElementById('face-progress-dots').innerHTML = '';
+    document.getElementById('robot-final-confirm').style.display = 'none';
+    document.getElementById('face-confirm-info').innerHTML = 'Waiting for first face…';
+    document.getElementById('btn-next-face').disabled = true;
+    _cleaningPass = 1;
+    setRobotStage('previewing');
+    setRobotStatus('Preview restarted — watch RViz.');
+  } catch(e) {
+    appendRobotLog('Reset error: '+e.message);
+    setRobotStatus('✗ '+e.message);
+  }
+}
+function showCleaningComplete() {
+  document.getElementById('celebrate-overlay').style.display = 'flex';
+}
+async function startSecondPass() {
+  if(!confirm('Rotate turntable 90° and clean the front/back sides now?'))return;
+  _cleaningPass = 2;
+  const btn = document.getElementById('btn-second-pass');
+  btn.disabled = true; btn.textContent = '⏳ Rotating…';
+  appendRobotLog('--- Rotating turntable 90° for second pass ---');
+  setRobotStatus('Rotating turntable…');
+  try {
+    const res = await fetch('/api/robot/second_pass',{method:'POST'});
+    const data = await res.json();
+    if(data.status!=='ok'){
+      appendRobotLog('✗ '+data.message); setRobotStatus('✗ '+(data.message||'error'));
+      btn.disabled=false; btn.textContent='🔄 ROTATE 90° + CLEAN FRONT/BACK'; return;
+    }
+    document.getElementById('face-progress-dots').innerHTML = '';
+    document.getElementById('robot-final-confirm').style.display = 'none';
+    document.getElementById('face-confirm-info').innerHTML = 'Waiting for first face…';
+    document.getElementById('btn-next-face').disabled = true;
+    setRobotStage('previewing'); setRobotStatus('Pass 2 preview running — watch RViz.');
+  } catch(e) {
+    appendRobotLog('Signal error: '+e.message); setRobotStatus('✗ '+e.message);
+    btn.disabled=false; btn.textContent='🔄 ROTATE 90° + CLEAN FRONT/BACK';
+  }
+}
+
+function resizeSelectCanvas() {
+  if (!selRenderer) return;
+  const wrap = document.getElementById('select-canvas-wrap');
+  selRenderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  selCamera.aspect = wrap.clientWidth / wrap.clientHeight;
+  selCamera.updateProjectionMatrix();
+}
+
+function resizeRobotCanvas() {}
+
+// ── Settings ───────────────────────────────────────────────────
+function applyConfigToSettings(cfg) {
+  document.getElementById('s-camera-height').value    = cfg.camera_height_m   || 0.165;
+  document.getElementById('s-camera-distance').value  = cfg.camera_distance_m || 0.258;
+  document.getElementById('s-camera-tilt').value      = cfg.camera_tilt_deg   || 112.5;
+  document.getElementById('s-degrees-step').value     = cfg.degrees_per_step  || 7.5;
+  document.getElementById('s-arduino-port').value     = cfg.arduino_port      || '/dev/ttyACM0';
+  document.getElementById('s-arduino-enabled').value  = cfg.arduino_enabled ? 'true' : 'false';
+  document.getElementById('s-robot-ip').value         = cfg.robot_ip          || '192.168.0.43';
+  document.getElementById('s-clean-path').value       = cfg.clean_stl_path    || '~/scan_clean.stl';
+  document.getElementById('s-avoid-path').value       = cfg.avoid_stl_path    || '~/scan_avoid.stl';
+  document.getElementById('s-path-planning-script').value = cfg.path_planning_script || '';
+  document.getElementById('s-cleaning-standoff').value = cfg.cleaning_standoff_m ?? 0.15;
+  document.getElementById('info-step').textContent    = (cfg.degrees_per_step || 7.5) + '°';
+  if (cfg.rs_laser_power !== undefined) {
+    document.getElementById('s-rs-laser').value = cfg.rs_laser_power;
+    document.getElementById('s-rs-laser-val').textContent = cfg.rs_laser_power;
+  }
+  if (cfg.rs_confidence !== undefined)
+    document.getElementById('s-rs-confidence').value = cfg.rs_confidence;
+  if (cfg.rs_depth_units !== undefined)
+    document.getElementById('s-rs-depth-units').value = cfg.rs_depth_units;
+  if (cfg.rs_inter_cam_sync !== undefined)
+    document.getElementById('s-rs-sync').value = cfg.rs_inter_cam_sync;
+}
+
+async function saveSettings() {
+  const newConfig = {
+    camera_height_m:   +document.getElementById('s-camera-height').value,
+    camera_distance_m: +document.getElementById('s-camera-distance').value,
+    camera_tilt_deg:   +document.getElementById('s-camera-tilt').value,
+    degrees_per_step:  +document.getElementById('s-degrees-step').value,
+    arduino_port:      document.getElementById('s-arduino-port').value,
+    arduino_enabled:   document.getElementById('s-arduino-enabled').value === 'true',
+    robot_ip:          document.getElementById('s-robot-ip').value,
+    clean_stl_path:    document.getElementById('s-clean-path').value,
+    avoid_stl_path:    document.getElementById('s-avoid-path').value,
+    path_planning_script: document.getElementById('s-path-planning-script').value,
+    cleaning_standoff_m: +document.getElementById('s-cleaning-standoff').value,
+    rs_laser_power:    +document.getElementById('s-rs-laser').value,
+    rs_confidence:     +document.getElementById('s-rs-confidence').value,
+    rs_depth_units:    +document.getElementById('s-rs-depth-units').value,
+    rs_inter_cam_sync: +document.getElementById('s-rs-sync').value,
+  };
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(newConfig)
+  });
+  config = newConfig;
+  arduinoEnabled = newConfig.arduino_enabled;
+  updateArduinoUI();
+  document.getElementById('info-step').textContent = newConfig.degrees_per_step + '°';
+  const msg = document.getElementById('save-msg');
+  msg.style.display = 'inline';
+  setTimeout(() => msg.style.display = 'none', 2000);
+}
+
+async function resetSettings() {
+  if (!confirm('Reset all settings to defaults?')) return;
+  const defaults = {
+    camera_height_m: 0.165, camera_distance_m: 0.258,
+    camera_tilt_deg: 112.5, degrees_per_step: 7.5,
+    arduino_port: '/dev/ttyACM0', arduino_enabled: true,
+    robot_ip: '192.168.0.43',
+    clean_stl_path: '~/scan_clean.stl', avoid_stl_path: '~/scan_avoid.stl',
+    cleaning_standoff_m: 0.15
+  };
+  applyConfigToSettings(defaults);
+  await fetch('/api/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(defaults)
+  });
+}
+
+// ── Vizcode integrations ───────────────────────────────────────
+
+// Scanline mesh-reveal animation — sweeps a glowing clip plane from the
+// bottom of the mesh to the top over ~1.7 s, then removes the clip.
+// Both the mesh tab and the select-faces tab call this on every new mesh load.
+function playMeshRevealAnimation(scene, mesh, pcdPoints, minY, maxY, setRevealing) {
+  const duration  = 1700;
+  const range     = Math.max(maxY - minY, 1e-6);
+  const overshoot = range * 0.04;
+
+  const plane = new THREE.Plane(new THREE.Vector3(0, -1, 0), minY);
+  mesh.material.clippingPlanes = [plane];
+  mesh.material.clipShadows    = false;
+
+  mesh.geometry.computeBoundingBox();
+  const bb = mesh.geometry.boundingBox;
+  const spanX = (bb.max.x - bb.min.x) * 1.4 + 1e-3;
+  const spanZ = (bb.max.z - bb.min.z) * 1.4 + 1e-3;
+  const scanMat  = new THREE.MeshBasicMaterial({
+    color: 0x66ccff, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  const scanLine = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), scanMat);
+  scanLine.rotation.x = -Math.PI / 2;
+  scanLine.scale.set(spanX, spanZ, 1);
+  scanLine.position.y = minY;
+  scanLine.renderOrder = 998;
+  scene.add(scanLine);
+
+  if (setRevealing) setRevealing(true);
+  const pcdStartOpacity = pcdPoints ? pcdPoints.material.opacity : 0;
+  const t0 = performance.now();
+
+  function tick(now) {
+    const t      = Math.min(1, (now - t0) / duration);
+    const eased  = 1 - Math.pow(1 - t, 3); // easeOutCubic
+    const sweepY = minY + eased * (range + overshoot);
+    plane.constant = sweepY;
+    scanLine.position.y = Math.min(sweepY, maxY);
+    scanLine.material.opacity = 0.9 * (1 - t * 0.3);
+    if (pcdPoints) pcdPoints.material.opacity = pcdStartOpacity * (1 - eased);
+    if (t < 1) {
+      requestAnimationFrame(tick);
+    } else {
+      mesh.material.clippingPlanes = [];
+      scene.remove(scanLine);
+      scanLine.geometry.dispose(); scanMat.dispose();
+      if (pcdPoints) scene.remove(pcdPoints);
+      if (setRevealing) setRevealing(false);
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+// Winding correction — flips any triangle whose normal points inward
+// relative to the mesh's own bounding-box centre.
+function orientTrianglesOutward(p, r){
+  const nTris = p.length/9;
+  if(!nTris) return;
+  let minX=Infinity,minY=Infinity,minZ=Infinity,maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
+  for(let k=0;k<p.length;k+=3){
+    const x=p[k],y=p[k+1],z=p[k+2];
+    if(x<minX)minX=x; if(x>maxX)maxX=x;
+    if(y<minY)minY=y; if(y>maxY)maxY=y;
+    if(z<minZ)minZ=z; if(z>maxZ)maxZ=z;
+  }
+  const cx=(minX+maxX)/2, cy=(minY+maxY)/2, cz=(minZ+maxZ)/2;
+  for(let t=0;t<nTris;t++){
+    const i=t*9;
+    const ax=p[i],   ay=p[i+1], az=p[i+2];
+    const bx=p[i+3], by=p[i+4], bz=p[i+5];
+    const ex=p[i+6], ey=p[i+7], ez=p[i+8];
+    const e1x=bx-ax, e1y=by-ay, e1z=bz-az;
+    const e2x=ex-ax, e2y=ey-ay, e2z=ez-az;
+    const nx=e1y*e2z-e1z*e2y, ny=e1z*e2x-e1x*e2z, nz=e1x*e2y-e1y*e2x;
+    const tcx=(ax+bx+ex)/3-cx, tcy=(ay+by+ey)/3-cy, tcz=(az+bz+ez)/3-cz;
+    const dot = nx*tcx + ny*tcy + nz*tcz;
+    if(dot<0){
+      p[i+3]=ex; p[i+4]=ey; p[i+5]=ez;
+      p[i+6]=bx; p[i+7]=by; p[i+8]=bz;
+      if(r){ for(let k=i;k<i+9;k++) r[k]=-r[k]; }
+    }
+  }
+}
+
+function parseSTLBinary(buf){
+  const v=new DataView(buf),n=v.getUint32(80,true);
+  if(buf.byteLength===84+n*50&&n>0){
+    const p=new Float32Array(n*9),r=new Float32Array(n*9);let o=84;
+    for(let i=0;i<n;i++){const nx=v.getFloat32(o,true),ny=v.getFloat32(o+4,true),nz=v.getFloat32(o+8,true);o+=12;
+      for(let j=0;j<3;j++){const k=i*9+j*3;p[k]=v.getFloat32(o,true);p[k+1]=v.getFloat32(o+4,true);p[k+2]=v.getFloat32(o+8,true);r[k]=nx;r[k+1]=ny;r[k+2]=nz;o+=12;}o+=2;}
+    orientTrianglesOutward(p, r);
+    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(p,3));g.setAttribute('normal',new THREE.BufferAttribute(r,3));return g;
+  }
+  const t=new TextDecoder().decode(buf),verts=[],re=/vertex\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)/g;
+  let m;while((m=re.exec(t))!==null)verts.push(+m[1],+m[2],+m[3]);
+  const vertsArr=new Float32Array(verts);
+  orientTrianglesOutward(vertsArr, null);
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(vertsArr,3));return g;
+}
+
+window.addEventListener('load', () => {
+  initPointcloudViewer();
+  initMeshViewer();
+  initMeshPcdInset();
+  initSelectViewer();
+  initInsetViewer();
+  initRobotControls();
+  socket.emit('request_pointcloud');
+});
+
+window.addEventListener('resize', () => {
+  resizeSelectCanvas();
+  resizeRobotCanvas();
+});
+</script>
+
+<!-- ── Debug checkbox (bottom-right, always visible) ── -->
+<div style="position:fixed;bottom:10px;right:14px;z-index:9999;
+            display:flex;align-items:center;gap:6px;
+            background:rgba(13,17,23,0.85);border:1px solid var(--border);
+            border-radius:6px;padding:5px 10px;backdrop-filter:blur(4px)">
+  <input type="checkbox" id="debug-checkbox"
+         style="accent-color:var(--yellow);cursor:pointer;width:13px;height:13px"
+         onchange="
+           var dbg = document.getElementById('debug-mesh-controls');
+           dbg.style.display = this.checked ? 'flex' : 'none';
+         ">
+  <label for="debug-checkbox"
+         style="color:var(--muted);font-size:10px;letter-spacing:1px;cursor:pointer;user-select:none">
+    DEBUG
+  </label>
+</div>
+</body>
+</html>
